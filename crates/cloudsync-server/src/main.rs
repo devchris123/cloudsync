@@ -1,4 +1,4 @@
-use std::{sync::Arc};
+use std::sync::Arc;
 
 use axum::{
     Json, Router, debug_handler,
@@ -8,8 +8,7 @@ use axum::{
     routing::{delete, get, post},
 };
 use cloudsync_common::{
-    CreateFileResponse, DeleteFileResponse, FileMeta, GetHealthResponse,
-    ListFilesResponse,
+    CreateFileResponse, DeleteFileResponse, FileMeta, GetHealthResponse, ListFilesResponse,
 };
 use redb::{Database, ReadableTable, TableDefinition};
 
@@ -74,13 +73,13 @@ async fn post_file(
     let tx = db.begin_read()?;
     let table = tx.open_table(TABLE)?;
     let raw_meta_access_guard = table.get(path.as_str())?;
-    tx.close()?;
-
+    drop(table);
     let mut file: Option<FileMeta> = None;
     if let Some(raw_meta_access_guard) = raw_meta_access_guard {
         let bytes = raw_meta_access_guard.value();
         file = Some(serde_json::from_slice::<FileMeta>(bytes)?);
     }
+    tx.close()?;
 
     let content_hash = cloudsync_common::hash_bytes(&content);
     let mut file_meta = FileMeta {
@@ -126,11 +125,11 @@ async fn delete_file(
     let tx = db.begin_read()?;
     let table = tx.open_table(TABLE)?;
     let file_meta_raw = table.get(pathname.as_str())?;
-    tx.close()?;
-
     let Some(file_meta_raw) = file_meta_raw else {
         return Err(AppError(anyhow::anyhow!("not found")));
     };
+    drop(table);
+    tx.close()?;
 
     let bytes = file_meta_raw.value();
     let mut file_meta = serde_json::from_slice::<FileMeta>(bytes)?;
@@ -185,21 +184,40 @@ struct AppState {
     db: Arc<Database>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let db = Database::create(DB_NAME)?;
-    let db = Arc::new(db);
-    let state = AppState { db };
-    let app = Router::<AppState>::new()
+fn create_app(state: AppState) -> Router {
+    Router::<AppState>::new()
         .route("/api/v1/health", get(get_health))
         .route("/api/v1/files", get(list_files))
         .route("/api/v1/files", post(post_file))
         .route("/api/v1/files/{*path}", get(get_file))
         .route("/api/v1/files/{*path}", delete(delete_file))
-        .with_state(state);
+        .with_state(state)
+}
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let db = Database::create(DB_NAME)?;
+    let tx = db.begin_write()?;
+    tx.open_table(TABLE)?;
+    tx.commit()?;
+    let db = Arc::new(db);
+    let state = AppState { db };
+    let app = create_app(state);
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3050").await.unwrap();
     axum::serve(listener, app).await.unwrap();
 
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]                                                                                                                         
+    async fn test_health() {
+        let result = get_health().await;
+        assert!(result.is_ok());
+    }
 }
