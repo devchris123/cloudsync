@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use serde::{Serialize,Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 pub struct FileMeta {
@@ -14,7 +14,6 @@ pub struct FileMeta {
     pub created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
 }
-
 
 #[derive(Serialize, Deserialize)]
 pub enum FileAction {
@@ -29,7 +28,7 @@ pub struct GetHealthRequest {}
 
 #[derive(Serialize, Deserialize)]
 pub struct GetHealthResponse {
-    pub status: String
+    pub status: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -37,17 +36,17 @@ pub struct ListFilesRequest {}
 
 #[derive(Serialize, Deserialize)]
 pub struct ListFilesResponse {
-    pub files: Vec<FileMeta>
+    pub files: Vec<FileMeta>,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct GetFileRequest {
-    pub path: String
+    pub path: String,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct GetFileResponse {
-    pub file: FileMeta
+    pub file: FileMeta,
 }
 
 // CreateFileRequest exists for consistency, but
@@ -55,23 +54,22 @@ pub struct GetFileResponse {
 // Multipart will be used for file uploads.
 #[derive(Serialize, Deserialize)]
 pub struct CreateFileRequest {
-    pub path: String,                                                        
-    pub content: Vec<u8>,  
+    pub path: String,
+    pub content: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct CreateFileResponse {
-    pub file: FileMeta
+    pub file: FileMeta,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct DeleteFileRequest {
-    pub path: String
+    pub path: String,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct DeleteFileResponse {}
-
 
 pub fn hash_file(fp: &Path) -> Result<String> {
     let bytes = std::fs::read(fp)?;
