@@ -28,7 +28,9 @@ pub enum FileAction {
 pub struct GetHealthRequest {}
 
 #[derive(Serialize, Deserialize)]
-pub struct GetHealthResponse {}
+pub struct GetHealthResponse {
+    pub status: String
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct ListFilesRequest {}
@@ -44,7 +46,9 @@ pub struct GetFileRequest {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct GetFileResponse {}
+pub struct GetFileResponse {
+    pub file: FileMeta
+}
 
 // CreateFileRequest exists for consistency, but
 // will not be sent over the wire as JSON
