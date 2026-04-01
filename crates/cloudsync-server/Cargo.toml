@@ -1,0 +1,14 @@
+[package]
+name = "cloudsync-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cloudsync-common = { path = "../cloudsync-common" }
+axum = { workspace = true }
+tokio = { workspace = true }
+redb = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

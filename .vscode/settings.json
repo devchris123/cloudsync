@@ -1,0 +1,13 @@
+{
+    "github.copilot.enable": {
+        "*": true,
+        "plaintext": true,
+        "markdown": true,
+        "scminput": false,
+        "[toml]": true
+    },
+    "[toml]": {                                                                  
+      "editor.defaultFormatter": "tamasfe.even-better-toml",                   
+      "editor.formatOnSave": true                                              
+  }   
+}
