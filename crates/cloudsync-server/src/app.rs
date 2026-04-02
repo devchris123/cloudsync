@@ -5,7 +5,7 @@ use axum::{
     extract::{Multipart, Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{Route, delete, get, post},
+    routing::{delete, get, post},
 };
 use cloudsync_common::{
     CreateFileResponse, DeleteFileResponse, GetHealthResponse, ListFilesResponse,
