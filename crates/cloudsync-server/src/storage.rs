@@ -1,19 +1,37 @@
 use cloudsync_common::hash_bytes;
 
-use crate::DATA_DIR;
-
-pub fn read(content_hash: &str) -> anyhow::Result<Vec<u8>> {
-    let dir = std::path::Path::new(DATA_DIR).join(&content_hash[0..2]);
+pub fn read(data_dir: &str, content_hash: &str) -> anyhow::Result<Vec<u8>> {
+    let dir = std::path::Path::new(data_dir).join(&content_hash[0..2]);
     let path = dir.join(content_hash);
     let res = std::fs::read(path)?;
     Ok(res)
 }
 
-pub fn write(content: &[u8]) -> anyhow::Result<String> {
+pub fn write(data_dir: &str, content: &[u8]) -> anyhow::Result<String> {
     let content_hash = hash_bytes(content);
-    let dir = std::path::Path::new(DATA_DIR).join(&content_hash[0..2]);
+    let dir = std::path::Path::new(data_dir).join(&content_hash[0..2]);
     let path = dir.join(&content_hash);
     std::fs::create_dir_all(dir)?;
     std::fs::write(&path, content)?;
     Ok(content_hash)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_write_read() {
+        let dir = TempDir::new().unwrap();
+        let dir = dir.path().to_str().unwrap();
+
+        let bytes = b"hello world";
+        let hash = write(dir, bytes).unwrap();
+
+        assert_eq!(hash, hash_bytes(bytes));
+
+        let content = read(dir, &hash).unwrap();
+        assert_eq!(content.as_slice(), bytes);
+    }
 }

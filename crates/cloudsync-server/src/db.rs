@@ -12,6 +12,9 @@ pub fn list(db: &Database) -> Result<Vec<FileMeta>, anyhow::Error> {
         let (_, val) = entry?;
         let bytes = val.value();
         let file_meta = serde_json::from_slice::<FileMeta>(bytes)?;
+        if file_meta.is_deleted {
+            continue;
+        }
         file_metas.push(file_meta);
     }
 
@@ -30,7 +33,7 @@ pub fn get(db: &Database, path: &str) -> Result<Option<FileMeta>, anyhow::Error>
     Ok(Some(file_meta))
 }
 
-pub fn put(db: &Database, path: &str, size: u64, content_hash: String) -> anyhow::Result<FileMeta> {
+pub fn put(db: &Database, path: &str, size: u64, content_hash: &str) -> anyhow::Result<FileMeta> {
     let tx = db.begin_read()?;
     let table = tx.open_table(TABLE)?;
     let entry = table.get(path)?;
@@ -38,7 +41,7 @@ pub fn put(db: &Database, path: &str, size: u64, content_hash: String) -> anyhow
     let mut file_meta = FileMeta {
         path: path.to_string(),
         size,
-        content_hash,
+        content_hash: content_hash.to_string(),
         version: 1,
         is_deleted: false,
         created_at: chrono::Utc::now(),
@@ -81,4 +84,71 @@ pub fn delete(db: &Database, path: &str) -> anyhow::Result<()> {
     }
     tx.commit()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    use cloudsync_common::hash_bytes;
+    use tempfile::TempDir;
+
+    fn test_db() -> (TempDir, Database) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.redb");
+        let db = redb::Database::create(&path).unwrap();
+        let tx = db.begin_write().unwrap();
+        tx.open_table(TABLE).unwrap();
+        tx.commit().unwrap();
+        (dir, db)
+    }
+
+    #[test]
+    fn test_full_lifecycle() {
+        let (_dir, db) = test_db();
+
+        let path = "somepath/test.txt";
+        let bytes = b"hello world";
+        let hash = hash_bytes(bytes);
+        let size = bytes.len() as u64;
+        let file_meta = put(&db, path, size, &hash).unwrap();
+
+        assert_eq!(file_meta.path, path);
+        assert_eq!(file_meta.content_hash, hash);
+        assert_eq!(file_meta.size, size);
+        assert_eq!(file_meta.version, 1);
+        assert_eq!(file_meta.is_deleted, false);
+
+        let file_meta = get(&db, path).unwrap().unwrap();
+        assert_eq!(file_meta.path, path);
+        assert_eq!(file_meta.content_hash, hash);
+        assert_eq!(file_meta.size, size);
+        assert_eq!(file_meta.version, 1);
+        assert_eq!(file_meta.is_deleted, false);
+
+        let file_meta = put(&db, path, size, &hash).unwrap();
+        assert_eq!(file_meta.version, 2);
+
+        let path = "somepath/test2.txt";
+        let bytes = b"hello world";
+        let hash = hash_bytes(bytes);
+        let size = bytes.len() as u64;
+        put(&db, path, size, &hash).unwrap();
+        let file_metas = list(&db).unwrap();
+        assert_eq!(file_metas.len(), 2);
+
+        delete(&db, path).unwrap();
+
+        let file_metas = list(&db).unwrap();
+        assert_eq!(file_metas.len(), 1);
+    }
+
+    #[test]
+    fn test_get_not_exist() {
+        let (_dir, db) = test_db();
+
+        let file_meta = get(&db, "notexist").unwrap();
+
+        assert!(file_meta.is_none());
+    }
 }
