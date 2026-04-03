@@ -1,11 +1,17 @@
+use clap::Parser;
+
 mod app;
+mod cli;
 mod db;
 mod storage;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let app = app::bootstrap_app().unwrap();
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3050").await.unwrap();
+    let args = cli::Args::parse();
+    let app = app::bootstrap_app(args.storage_dir, args.token, args.dbname).unwrap();
+    let listener = tokio::net::TcpListener::bind(format!("{}:{}", args.host, args.port))
+        .await
+        .unwrap();
     axum::serve(listener, app).await.unwrap();
     Ok(())
 }

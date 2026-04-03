@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router, debug_handler,
-    extract::{Multipart, Path, State},
+    extract::{Multipart, Path, Request, State},
     http::StatusCode,
-    response::IntoResponse,
+    middleware::Next,
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
 use cloudsync_common::{
@@ -15,13 +16,11 @@ use redb::Database;
 use super::db;
 use super::storage;
 
-pub const DB_NAME: &str = "data.redb";
-
-const DATA_DIR: &str = "cloudsync/data/files";
-
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<Database>,
+    pub storage_dir: String,
+    pub token: String,
 }
 
 struct AppError(anyhow::Error);
@@ -62,7 +61,7 @@ async fn post_file(
     let path = path.unwrap();
     let content = content.unwrap();
 
-    let content_hash: String = storage::write(DATA_DIR, &content)?;
+    let content_hash: String = storage::write(&state.storage_dir, &content)?;
     let db = state.db;
     let file_meta = db::put(&db, &path, content.len() as u64, &content_hash)?;
 
@@ -90,7 +89,7 @@ async fn get_file(
         return Err(AppError(anyhow::anyhow!("not found")));
     };
     let content_hash = file_meta.content_hash;
-    let content = storage::read(DATA_DIR, &content_hash)?;
+    let content = storage::read(&state.storage_dir, &content_hash)?;
     Ok(content)
 }
 
@@ -101,23 +100,49 @@ async fn get_health() -> Result<Json<GetHealthResponse>, AppError> {
     }))
 }
 
+async fn auth_layer(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let headers = request.headers();
+    let auth_header = headers.get("Authorization");
+    let Some(auth_header) = auth_header else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+    if auth_header.to_str().unwrap() != format!("Bearer {}", state.token) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(next.run(request).await)
+}
+
 pub fn create_app(state: AppState) -> Router {
-    Router::<AppState>::new()
-        .route("/api/v1/health", get(get_health))
+    let auth_router = Router::<AppState>::new()
         .route("/api/v1/files", get(list_files))
         .route("/api/v1/files", post(post_file))
         .route("/api/v1/files/{*path}", get(get_file))
         .route("/api/v1/files/{*path}", delete(delete_file))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth_layer,
+        ));
+    Router::<AppState>::new()
+        .route("/api/v1/health", get(get_health))
+        .merge(auth_router)
         .with_state(state)
 }
 
-pub fn bootstrap_app() -> anyhow::Result<Router> {
-    let db = Database::create(DB_NAME)?;
+pub fn bootstrap_app(storage_dir: String, token: String, dbname: String) -> anyhow::Result<Router> {
+    let db = Database::create(dbname)?;
     let tx = db.begin_write()?;
     tx.open_table(db::TABLE)?;
     tx.commit()?;
     let db = Arc::new(db);
-    let state = AppState { db };
+    let state = AppState {
+        db,
+        storage_dir,
+        token,
+    };
     let app = create_app(state);
     Ok(app)
 }
