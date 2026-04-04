@@ -32,14 +32,18 @@ impl SyncClient {
     ) -> anyhow::Result<CreateFileResponse> {
         let form = reqwest::multipart::Form::new()
             .text("path", path.to_string())
-            .part("file", reqwest::multipart::Part::bytes(content));
+            .part("file", reqwest::multipart::Part::bytes(content).file_name("file"));
         let resp = self.client
             .post(format!("{}/{}", self.server_url, "api/v1/files"))
             .bearer_auth(&self.token)
             .multipart(form)
             .send()
             .await?;
+        let status = resp.status();
         let bytes = resp.bytes().await?;
+        if !status.is_success() {
+            anyhow::bail!("Server error {}: {}", status, String::from_utf8_lossy(&bytes))
+        }
         Ok(serde_json::from_slice::<CreateFileResponse>(&bytes)?)
     }
 

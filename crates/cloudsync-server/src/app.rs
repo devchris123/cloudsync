@@ -2,12 +2,14 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router, debug_handler,
-    extract::{Multipart, Path, Request, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Request, State},
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
+use tower_http::trace::TraceLayer;
+
 use cloudsync_common::{
     CreateFileResponse, DeleteFileResponse, GetHealthResponse, ListFilesResponse,
 };
@@ -129,6 +131,8 @@ pub fn create_app(state: AppState) -> Router {
     Router::<AppState>::new()
         .route("/api/v1/health", get(get_health))
         .merge(auth_router)
+        .layer(TraceLayer::new_for_http())
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50MB
         .with_state(state)
 }
 

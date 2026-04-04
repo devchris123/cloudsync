@@ -5,7 +5,7 @@ use redb::Database;
 use serde::{Deserialize, Serialize};
 
 use crate::{client, db};
-use crate::scanner::scan_dir;
+use crate::scanner;
 
 #[derive(Serialize, Deserialize)]
 pub struct SyncRecord {
@@ -19,7 +19,8 @@ pub async fn push(
     sync_client: &client::SyncClient,
     sync_root: &Path,
 ) -> anyhow::Result<()> {
-    let files = scan_dir(&sync_root)?;
+    let ignored = scanner::get_ignored(sync_root);
+    let files = scanner::scan_dir(&sync_root, &ignored)?;
 
     for file in files.iter() {
         let bytes = std::fs::read(&file)?;

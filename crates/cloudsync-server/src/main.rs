@@ -8,6 +8,7 @@ mod storage;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = cli::Args::parse();
+    tracing_subscriber::fmt::init();
     let app = app::bootstrap_app(args.storage_dir, args.token, args.dbname).unwrap();
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", args.host, args.port))
         .await
