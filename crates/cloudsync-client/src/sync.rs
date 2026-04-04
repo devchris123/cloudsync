@@ -1,11 +1,11 @@
-use std::path::{Path};
+use std::path::Path;
 
 use cloudsync_common::hash_bytes;
 use redb::Database;
 use serde::{Deserialize, Serialize};
 
-use crate::{client, db};
 use crate::scanner;
+use crate::{client, db};
 
 #[derive(Serialize, Deserialize)]
 pub struct SyncRecord {
@@ -51,3 +51,48 @@ pub async fn push(
     Ok(())
 }
 
+pub async fn pull(
+    db: &Database,
+    sync_client: &client::SyncClient,
+    sync_root: &Path,
+) -> anyhow::Result<()> {
+    let files = sync_client.list_files().await?;
+
+    for file in files.files {
+        let record = db::get(db, &file.path)?;
+
+        if let Some(record) = record {
+            if record.server_version == file.version {
+                continue;
+            }
+            if record.server_version < file.version {
+                let local_path = &sync_root.join(&file.path);
+                if local_path.exists() {
+                    let local_content = std::fs::read(&local_path)?;
+                    let hash = hash_bytes(&local_content);
+                    if hash != record.local_hash {
+                        println!(
+                            "Conflict: {} changed locally and on server, skipping",
+                            file.path
+                        );
+                        continue;
+                    }
+                }
+            }
+        }
+        let content = sync_client.get_file(&file.path).await?;
+        let path = &sync_root.join(&file.path);
+        let parent_dir = std::path::Path::new(path).parent();
+        if let Some(parent_dir) = parent_dir {
+            std::fs::create_dir_all(&parent_dir)?;
+        };
+        std::fs::write(&sync_root.join(&file.path), &content)?;
+        let sync_record = SyncRecord {
+            path: file.path,
+            local_hash: hash_bytes(&content),
+            server_version: file.version,
+        };
+        db::put(db, sync_record)?;
+    }
+    Ok(())
+}
