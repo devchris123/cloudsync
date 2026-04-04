@@ -1,12 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::path::{Path};
 
 use cloudsync_common::hash_bytes;
 use redb::Database;
 use serde::{Deserialize, Serialize};
 
 use crate::{client, db};
-
-use super::config;
+use crate::scanner::scan_dir;
 
 #[derive(Serialize, Deserialize)]
 pub struct SyncRecord {
@@ -51,21 +50,3 @@ pub async fn push(
     Ok(())
 }
 
-pub fn scan_dir(sync_root: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let dirs_iter = std::fs::read_dir(sync_root)?;
-
-    let mut changed_files: Vec<PathBuf> = Vec::new();
-    for dir in dirs_iter {
-        let dir = dir?;
-        if dir.file_name() == config::CONFIG_DIR {
-            continue;
-        }
-        if dir.file_type()?.is_dir() {
-            let mut sub_files = scan_dir(&dir.path())?;
-            changed_files.append(&mut sub_files);
-            continue;
-        }
-        changed_files.push(dir.path());
-    }
-    Ok(changed_files)
-}

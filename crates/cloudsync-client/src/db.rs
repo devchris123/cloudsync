@@ -1,16 +1,21 @@
+use std::path::Path;
+
 use redb::{Database, ReadableTable, TableDefinition};
 
 use crate::sync::SyncRecord;
 
-const DB_NAME: &str = "sync.redb";
+pub const DB_NAME: &str = "sync.redb";
 
 const TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("sync_records");
 
-pub fn init_db() -> anyhow::Result<()> {
-    let db = Database::create(DB_NAME)?;
+
+pub fn open_db(root: &Path) -> anyhow::Result<Database> {
+    let db_path = root.join(DB_NAME);
+    let db = Database::create(db_path)?;
     let tx = db.begin_write()?;
+    { tx.open_table(TABLE)?; }
     tx.commit()?;
-    Ok(())
+    Ok(db)
 }
 
 pub fn list(db: &Database) -> anyhow::Result<Vec<SyncRecord>> {

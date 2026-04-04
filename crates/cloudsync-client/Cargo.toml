@@ -12,3 +12,4 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 reqwest = { workspace = true }
 redb = { workspace = true }
+tokio = { workspace = true }
