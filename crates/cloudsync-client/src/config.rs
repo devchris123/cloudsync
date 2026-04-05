@@ -8,7 +8,7 @@ const CONFIG_PATH: &str = ".cloudsync/config.toml";
 #[derive(Serialize, Deserialize)]
 pub struct ClientConfig {
     pub server_url: String,
-    pub token: String
+    pub token: String,
 }
 
 impl ClientConfig {

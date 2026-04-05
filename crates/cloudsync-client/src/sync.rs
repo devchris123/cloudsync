@@ -4,7 +4,7 @@ use cloudsync_common::hash_bytes;
 use redb::Database;
 use serde::{Deserialize, Serialize};
 
-use crate::scanner;
+use crate::scanner::{self, scan_dir};
 use crate::{client, db};
 
 #[derive(Serialize, Deserialize)]
@@ -93,6 +93,63 @@ pub async fn pull(
             server_version: file.version,
         };
         db::put(db, sync_record)?;
+    }
+    Ok(())
+}
+
+pub async fn status(
+    db: &Database,
+    sync_client: &client::SyncClient,
+    sync_root: &Path,
+) -> anyhow::Result<()> {
+    let ignored = &scanner::get_ignored(sync_root);
+    let files = scan_dir(&sync_root, &ignored)?;
+
+    let server_files = sync_client.list_files().await?.files;
+    for file in files.iter() {
+        let content = std::fs::read(&file)?;
+        let path_str = file.strip_prefix(&sync_root)?.to_str().unwrap().to_string();
+        let sync_record = db::get(db, &path_str)?;
+
+        let Some(sync_record) = sync_record else {
+            println!("{} - {}", &path_str, "new (local)");
+            continue;
+        };
+        let server_hash = server_files.iter().find(|f| f.path == path_str);
+        let hash = hash_bytes(&content);
+        if hash != sync_record.local_hash {
+            if let Some(sf) = server_hash {
+                if sf.version > sync_record.server_version {
+                    println!("{} - {}", &path_str, "conflict");
+                    continue;
+                }
+            }
+            println!("{} - {}", &path_str, "update (local)");
+            continue;
+        }
+        if let Some(server_hash) = server_hash {
+            if server_hash.content_hash != sync_record.local_hash {
+                println!("{} - {}", &path_str, "update (server)");
+                continue;
+            }
+        }
+        println!("{} - {}", &path_str, "no update");
+    }
+
+    for server_file in server_files {
+        if files.iter().any(|f| {
+            let path_str = f.strip_prefix(sync_root).ok().and_then(|f| f.to_str());
+            path_str == Some(&server_file.path)
+        }) {
+            continue;
+        }
+        let path = sync_root.join(&server_file.path);
+        let sync_record = db::get(db, &server_file.path)?;
+        if sync_record.is_none() {
+            println!("{} - {}", server_file.path, "new (server)")
+        } else if !path.exists() {
+            println!("{} - {}", &server_file.path, "deleted (local)");
+        }
     }
     Ok(())
 }

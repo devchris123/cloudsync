@@ -8,12 +8,13 @@ pub const DB_NAME: &str = ".cloudsync/sync.redb";
 
 const TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("sync_records");
 
-
 pub fn open_db(root: &Path) -> anyhow::Result<Database> {
     let db_path = root.join(DB_NAME);
     let db: Database = Database::create(db_path)?;
     let tx = db.begin_write()?;
-    { tx.open_table(TABLE)?; }
+    {
+        tx.open_table(TABLE)?;
+    }
     tx.commit()?;
     Ok(db)
 }

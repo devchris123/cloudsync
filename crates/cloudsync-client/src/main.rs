@@ -39,7 +39,11 @@ async fn main() -> anyhow::Result<()> {
             sync::pull(&db, &sync_client, &sync_root).await?;
         }
         cli::Command::Status => {
-            let _config = load_config()?;
+            let config = load_config()?;
+            let sync_root = config::ClientConfig::find_sync_root()?;
+            let db = db::open_db(&sync_root)?;
+            let sync_client = client::SyncClient::new(config.server_url, config.token);
+            sync::status(&db, &sync_client, &sync_root).await?;
         }
     }
 

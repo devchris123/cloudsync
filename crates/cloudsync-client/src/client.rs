@@ -3,20 +3,21 @@ use cloudsync_common::{CreateFileResponse, DeleteFileResponse, ListFilesResponse
 pub struct SyncClient {
     server_url: String,
     token: String,
-    client: reqwest::Client
+    client: reqwest::Client,
 }
 
 impl SyncClient {
-    pub fn new( server_url: String, token: String) -> Self {
+    pub fn new(server_url: String, token: String) -> Self {
         SyncClient {
             server_url,
             token,
-            client:  reqwest::Client::new()
+            client: reqwest::Client::new(),
         }
     }
 
     pub async fn list_files(&self) -> anyhow::Result<ListFilesResponse> {
-        let resp = self.client
+        let resp = self
+            .client
             .get(format!("{}/{}", self.server_url, "api/v1/files"))
             .bearer_auth(&self.token)
             .send()
@@ -32,8 +33,12 @@ impl SyncClient {
     ) -> anyhow::Result<CreateFileResponse> {
         let form = reqwest::multipart::Form::new()
             .text("path", path.to_string())
-            .part("file", reqwest::multipart::Part::bytes(content).file_name("file"));
-        let resp = self.client
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(content).file_name("file"),
+            );
+        let resp = self
+            .client
             .post(format!("{}/{}", self.server_url, "api/v1/files"))
             .bearer_auth(&self.token)
             .multipart(form)
@@ -42,13 +47,18 @@ impl SyncClient {
         let status = resp.status();
         let bytes = resp.bytes().await?;
         if !status.is_success() {
-            anyhow::bail!("Server error {}: {}", status, String::from_utf8_lossy(&bytes))
+            anyhow::bail!(
+                "Server error {}: {}",
+                status,
+                String::from_utf8_lossy(&bytes)
+            )
         }
         Ok(serde_json::from_slice::<CreateFileResponse>(&bytes)?)
     }
 
     pub async fn get_file(&self, path: &str) -> anyhow::Result<Vec<u8>> {
-        let resp = self.client
+        let resp = self
+            .client
             .get(format!("{}/{}/{}", self.server_url, "api/v1/files", path))
             .bearer_auth(&self.token)
             .send()
@@ -58,7 +68,8 @@ impl SyncClient {
     }
 
     pub async fn delete_file(&self, path: &str) -> anyhow::Result<DeleteFileResponse> {
-        let resp = self.client
+        let resp = self
+            .client
             .delete(format!("{}/{}/{}", self.server_url, "api/v1/files", path))
             .bearer_auth(&self.token)
             .send()
