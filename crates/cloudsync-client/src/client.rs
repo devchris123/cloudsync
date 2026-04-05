@@ -1,5 +1,7 @@
 use cloudsync_common::{CreateFileResponse, DeleteFileResponse, ListFilesResponse};
 
+use crate::sync::SyncApi;
+
 pub struct SyncClient {
     server_url: String,
     token: String,
@@ -20,8 +22,10 @@ impl SyncClient {
         self.client.get(url).send().await?;
         Ok(())
     }
+}
 
-    pub async fn list_files(&self) -> anyhow::Result<ListFilesResponse> {
+impl SyncApi for SyncClient {
+    async fn list_files(&self) -> anyhow::Result<ListFilesResponse> {
         let url = format!("{}/{}", self.server_url, "api/v1/files");
         tracing::debug!("request: {} {}", "get", &url);
         let resp = self.client.get(url).bearer_auth(&self.token).send().await?;
@@ -37,7 +41,7 @@ impl SyncClient {
         Ok(serde_json::from_slice::<ListFilesResponse>(&bytes)?)
     }
 
-    pub async fn create_file(
+    async fn create_file(
         &self,
         path: &str,
         content: Vec<u8>,
@@ -69,7 +73,7 @@ impl SyncClient {
         Ok(serde_json::from_slice::<CreateFileResponse>(&bytes)?)
     }
 
-    pub async fn get_file(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+    async fn get_file(&self, path: &str) -> anyhow::Result<Vec<u8>> {
         let url = format!("{}/{}/{}", self.server_url, "api/v1/files", path);
         tracing::debug!("request: {} {}", "get", &url);
         let resp = self.client.get(url).bearer_auth(&self.token).send().await?;
@@ -85,7 +89,7 @@ impl SyncClient {
         Ok(bytes.to_vec())
     }
 
-    pub async fn delete_file(&self, path: &str) -> anyhow::Result<DeleteFileResponse> {
+    async fn delete_file(&self, path: &str) -> anyhow::Result<DeleteFileResponse> {
         let url = format!("{}/{}/{}", self.server_url, "api/v1/files", path);
         tracing::debug!("request: {} {}", "delete", &url);
         let resp = self

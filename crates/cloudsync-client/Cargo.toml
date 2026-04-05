@@ -14,3 +14,5 @@ reqwest = { workspace = true }
 redb = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+tempfile = "3"
+chrono = { workspace = true }
