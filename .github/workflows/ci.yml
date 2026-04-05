@@ -10,16 +10,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  build-and-test:
     runs-on: [ubuntu-24.04]
     steps:
-      - name: "Checkout code"
+      - name: Checkout code
         uses: actions/checkout@v6
-      - name: "Setup rust"
+      - name: Setup rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: "Check format"
-        run: cargo fmt --check
-      - name: "Run linter"
+      - name: Rustfmt Check
+        uses: actions-rust-lang/rustfmt@v1
+      - name: Clippy Check
         run: cargo clippy -- --deny warnings
-      - name: "Run tests"
+      - name: Run tests
         run: cargo test
