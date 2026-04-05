@@ -1,11 +1,21 @@
 use std::path::Path;
 
-use cloudsync_common::{FileMeta, hash_bytes};
+use cloudsync_common::{
+    CreateFileResponse, DeleteFileResponse, FileMeta, ListFilesResponse, hash_bytes,
+};
 use redb::Database;
 use serde::{Deserialize, Serialize};
 
+use crate::db;
 use crate::scanner::{self, scan_dir};
-use crate::{client, db};
+
+pub trait SyncApi {
+    async fn list_files(&self) -> anyhow::Result<ListFilesResponse>;
+    async fn create_file(&self, path: &str, content: Vec<u8>)
+    -> anyhow::Result<CreateFileResponse>;
+    async fn get_file(&self, path: &str) -> anyhow::Result<Vec<u8>>;
+    async fn delete_file(&self, path: &str) -> anyhow::Result<DeleteFileResponse>;
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct SyncRecord {
@@ -16,7 +26,7 @@ pub struct SyncRecord {
 
 pub async fn push(
     db: &Database,
-    sync_client: &client::SyncClient,
+    sync_client: &impl SyncApi,
     sync_root: &Path,
 ) -> anyhow::Result<()> {
     let ignored = scanner::get_ignored(sync_root);
@@ -47,7 +57,7 @@ pub async fn push(
 
 async fn push_single_file(
     db: &Database,
-    sync_client: &client::SyncClient,
+    sync_client: &impl SyncApi,
     sync_root: &Path,
     file: &Path,
 ) -> anyhow::Result<()> {
@@ -72,7 +82,7 @@ async fn push_single_file(
 }
 
 pub async fn delete_file(
-    sync_client: &client::SyncClient,
+    sync_client: &impl SyncApi,
     db: &Database,
     path: &str,
 ) -> anyhow::Result<()> {
@@ -84,7 +94,7 @@ pub async fn delete_file(
 
 pub async fn pull(
     db: &Database,
-    sync_client: &client::SyncClient,
+    sync_client: &impl SyncApi,
     sync_root: &Path,
 ) -> anyhow::Result<()> {
     let files = sync_client.list_files().await?;
@@ -99,7 +109,7 @@ pub async fn pull(
 
 async fn pull_single_file(
     db: &Database,
-    sync_client: &client::SyncClient,
+    sync_client: &impl SyncApi,
     sync_root: &Path,
     file: &FileMeta,
 ) -> anyhow::Result<()> {
@@ -144,7 +154,7 @@ async fn pull_single_file(
 
 pub async fn status(
     db: &Database,
-    sync_client: &client::SyncClient,
+    sync_client: &impl SyncApi,
     sync_root: &Path,
 ) -> anyhow::Result<()> {
     let ignored = &scanner::get_ignored(sync_root);
@@ -197,4 +207,306 @@ pub async fn status(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use tempfile::TempDir;
+
+    use crate::db::open_db;
+
+    use super::*;
+
+    struct MockClient {
+        files: RefCell<Vec<FileMeta>>,
+        list_count: RefCell<u64>,
+        create_count: RefCell<u64>,
+        get_count: RefCell<u64>,
+        delete_count: RefCell<u64>,
+        fail_path: RefCell<Option<String>>,
+    }
+
+    impl MockClient {
+        fn new(files: Vec<FileMeta>) -> Self {
+            MockClient {
+                files: RefCell::new(files),
+                list_count: RefCell::new(0),
+                create_count: RefCell::new(0),
+                get_count: RefCell::new(0),
+                delete_count: RefCell::new(0),
+                fail_path: RefCell::new(None),
+            }
+        }
+
+        fn set_files(&self, files: Vec<FileMeta>) {
+            *self.files.borrow_mut() = files;
+        }
+
+        fn set_fail_path(&self, path: String) {
+            *self.fail_path.borrow_mut() = Some(path);
+        }
+    }
+
+    impl SyncApi for MockClient {
+        async fn list_files(&self) -> anyhow::Result<ListFilesResponse> {
+            *self.list_count.borrow_mut() += 1;
+            let files = self.files.borrow().clone();
+            Ok(ListFilesResponse { files })
+        }
+
+        async fn create_file(
+            &self,
+            _path: &str,
+            _content: Vec<u8>,
+        ) -> anyhow::Result<CreateFileResponse> {
+            *self.create_count.borrow_mut() += 1;
+            Ok(CreateFileResponse {
+                file: FileMeta {
+                    path: "".to_string(),
+                    size: 0,
+                    content_hash: "".to_string(),
+                    version: 0,
+                    is_deleted: false,
+                    created_at: chrono::Utc::now(),
+                    modified_at: chrono::Utc::now(),
+                },
+            })
+        }
+
+        async fn get_file(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+            if self.fail_path.borrow().as_deref() == Some(path) {
+                anyhow::bail!("error");
+            }
+            *self.get_count.borrow_mut() += 1;
+            Ok(Vec::new())
+        }
+
+        async fn delete_file(&self, _path: &str) -> anyhow::Result<DeleteFileResponse> {
+            *self.delete_count.borrow_mut() += 1;
+            Ok(DeleteFileResponse {})
+        }
+    }
+
+    fn setup() -> (Database, MockClient, TempDir) {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(temp_dir.path().join(".cloudsync")).unwrap();
+        let db = open_db(temp_dir.path()).unwrap();
+        let mock_client = MockClient::new(Vec::new());
+        return (db, mock_client, temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_push_single_file() {
+        let (db, mock_client, temp_dir) = setup();
+        let file = temp_dir.path().join("file0");
+        let bytes = b"hello world";
+        std::fs::write(&file, bytes).unwrap();
+
+        push_single_file(&db, &mock_client, temp_dir.path(), &file)
+            .await
+            .unwrap();
+
+        let record = db::get(&db, "file0").unwrap();
+        assert!(record.is_some());
+        assert_eq!(*mock_client.create_count.borrow(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_skip_file() {
+        let (db, mock_client, temp_dir) = setup();
+        let file = temp_dir.path().join("file0");
+        std::fs::write(&file, b"hello world").unwrap();
+        let bytes = b"hello world";
+        let sync_record = SyncRecord {
+            path: "file0".to_string(),
+            local_hash: hash_bytes(bytes),
+            server_version: 0,
+        };
+        db::put(&db, sync_record).unwrap();
+
+        push_single_file(&db, &mock_client, temp_dir.path(), &file)
+            .await
+            .unwrap();
+
+        assert_eq!(*mock_client.create_count.borrow(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_push_creates_files() {
+        let (db, mock_client, temp_dir) = setup();
+        let file0 = temp_dir.path().join("file0");
+        let file1 = temp_dir.path().join("file1");
+        std::fs::write(file0, b"hello world").unwrap();
+        std::fs::write(file1, b"hello world").unwrap();
+
+        push(&db, &mock_client, temp_dir.path()).await.unwrap();
+
+        assert_eq!(*mock_client.create_count.borrow(), 2);
+        assert_eq!(*mock_client.delete_count.borrow(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_push_deletes_files() {
+        let (db, mock_client, temp_dir) = setup();
+        let bytes: &[u8; 11] = b"hello world";
+        let sync_record = SyncRecord {
+            path: "file0".to_string(),
+            local_hash: hash_bytes(bytes),
+            server_version: 0,
+        };
+        db::put(&db, sync_record).unwrap();
+
+        push(&db, &mock_client, temp_dir.path()).await.unwrap();
+
+        assert_eq!(*mock_client.create_count.borrow(), 0);
+        assert_eq!(*mock_client.delete_count.borrow(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_push_creates_updated_files() {
+        let (db, mock_client, temp_dir) = setup();
+        let file0 = temp_dir.path().join("file0");
+        let file1 = temp_dir.path().join("file1");
+        std::fs::write(file0, b"hello world").unwrap();
+        std::fs::write(file1, b"hello world").unwrap();
+        let bytes: &[u8; 11] = b"hello world";
+        let sync_record = SyncRecord {
+            path: "file0".to_string(),
+            local_hash: hash_bytes(bytes),
+            server_version: 0,
+        };
+        db::put(&db, sync_record).unwrap();
+
+        push(&db, &mock_client, temp_dir.path()).await.unwrap();
+
+        assert_eq!(*mock_client.create_count.borrow(), 1);
+        assert_eq!(*mock_client.delete_count.borrow(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_pull_downloads_and_saves() {
+        let (db, mock_client, temp_dir) = setup();
+
+        let file_meta = make_file_meta("file0", 0);
+
+        pull_single_file(&db, &mock_client, temp_dir.path(), &file_meta)
+            .await
+            .unwrap();
+
+        assert_eq!(*mock_client.get_count.borrow(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_pull_skips_file() {
+        let (db, mock_client, temp_dir) = setup();
+        let file_meta = make_file_meta("file0", 2);
+        let bytes: &[u8; 11] = b"hello world";
+        let sync_record = SyncRecord {
+            path: "file0".to_string(),
+            local_hash: hash_bytes(bytes),
+            server_version: 2,
+        };
+        db::put(&db, sync_record).unwrap();
+
+        pull_single_file(&db, &mock_client, temp_dir.path(), &file_meta)
+            .await
+            .unwrap();
+
+        assert_eq!(*mock_client.get_count.borrow(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_pull_downloads_server_update() {
+        let (db, mock_client, temp_dir) = setup();
+        let file0 = temp_dir.path().join("file0");
+        let bytes: &[u8; 11] = b"hello world";
+        std::fs::write(file0, bytes).unwrap();
+
+        let file_meta = make_file_meta("file0", 2);
+
+        let sync_record = SyncRecord {
+            path: "file0".to_string(),
+            local_hash: hash_bytes(bytes),
+            server_version: 1,
+        };
+        db::put(&db, sync_record).unwrap();
+
+        pull_single_file(&db, &mock_client, temp_dir.path(), &file_meta)
+            .await
+            .unwrap();
+
+        assert_eq!(*mock_client.get_count.borrow(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_pull_skips_conflict() {
+        let (db, mock_client, temp_dir) = setup();
+        let file0 = temp_dir.path().join("file0");
+        let bytes: &[u8; 11] = b"hello world";
+        std::fs::write(file0, bytes).unwrap();
+
+        let file_meta = make_file_meta("file0", 2);
+
+        let sync_record = SyncRecord {
+            path: "file0".to_string(),
+            local_hash: "somethingelse".to_string(),
+            server_version: 1,
+        };
+        db::put(&db, sync_record).unwrap();
+
+        pull_single_file(&db, &mock_client, temp_dir.path(), &file_meta)
+            .await
+            .unwrap();
+
+        assert_eq!(*mock_client.get_count.borrow(), 0);
+    }
+
+    fn make_file_meta(path: &str, version: u64) -> FileMeta {
+        FileMeta {
+            path: path.to_string(),
+            size: 0,
+            content_hash: "".to_string(),
+            version,
+            is_deleted: false,
+            created_at: chrono::Utc::now(),
+            modified_at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pull_downloads_files() {
+        let (db, mock_client, temp_dir) = setup();
+        let file0 = temp_dir.path().join("file0");
+        let bytes: &[u8; 11] = b"hello world";
+        std::fs::write(file0, bytes).unwrap();
+
+        let file_meta0 = make_file_meta("file0", 2);
+        let file_meta1 = make_file_meta("file01", 2);
+        mock_client.set_files(vec![file_meta0, file_meta1]);
+
+        pull(&db, &mock_client, temp_dir.path()).await.unwrap();
+
+        assert_eq!(*mock_client.list_count.borrow(), 1);
+        assert_eq!(*mock_client.get_count.borrow(), 2)
+    }
+
+    #[tokio::test]
+    async fn test_pull_continues_on_error() {
+        let (db, mock_client, temp_dir) = setup();
+        let file0 = temp_dir.path().join("file0");
+        let bytes: &[u8; 11] = b"hello world";
+        std::fs::write(file0, bytes).unwrap();
+
+        let file_meta0 = make_file_meta("file0", 2);
+        let file_meta1 = make_file_meta("file1", 2);
+        mock_client.set_files(vec![file_meta0, file_meta1]);
+        mock_client.set_fail_path("file1".to_string());
+
+        pull(&db, &mock_client, temp_dir.path()).await.unwrap();
+
+        assert_eq!(*mock_client.list_count.borrow(), 1);
+        assert_eq!(*mock_client.get_count.borrow(), 1)
+    }
 }
