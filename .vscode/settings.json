@@ -6,8 +6,12 @@
         "scminput": false,
         "[toml]": true
     },
-    "[toml]": {                                                                  
-      "editor.defaultFormatter": "tamasfe.even-better-toml",                   
-      "editor.formatOnSave": true                                              
-  }   
+    "[toml]": {
+        "editor.defaultFormatter": "tamasfe.even-better-toml",
+        "editor.formatOnSave": true
+    },
+    "editor.formatOnSave": true,
+    "[rust]": {
+        "editor.defaultFormatter": "rust-lang.rust-analyzer"
+    }
 }
