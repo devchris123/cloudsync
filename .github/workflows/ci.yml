@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: [ubuntu-24.04]
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@v6
+      - name: "Setup rust"
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: "Check format"
+        run: cargo fmt --check
+      - name: "Run linter"
+        run: cargo clippy -- --deny warnings
+      - name: "Run tests"
+        run: cargo test
