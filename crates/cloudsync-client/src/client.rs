@@ -16,9 +16,11 @@ impl SyncClient {
     }
 
     pub async fn list_files(&self) -> anyhow::Result<ListFilesResponse> {
+        let url = format!("{}/{}", self.server_url, "api/v1/files");
+        tracing::debug!("request: {} {}", "get", &url);
         let resp = self
             .client
-            .get(format!("{}/{}", self.server_url, "api/v1/files"))
+            .get(url)
             .bearer_auth(&self.token)
             .send()
             .await?;
@@ -37,9 +39,11 @@ impl SyncClient {
                 "file",
                 reqwest::multipart::Part::bytes(content).file_name("file"),
             );
+        let url = format!("{}/{}", self.server_url, "api/v1/files");
+        tracing::debug!("request: {} {}", "post", &url);
         let resp = self
             .client
-            .post(format!("{}/{}", self.server_url, "api/v1/files"))
+            .post(url)
             .bearer_auth(&self.token)
             .multipart(form)
             .send()
@@ -57,9 +61,11 @@ impl SyncClient {
     }
 
     pub async fn get_file(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+        let url = format!("{}/{}/{}", self.server_url, "api/v1/files", path);
+        tracing::debug!("request: {} {}", "get", &url);
         let resp = self
             .client
-            .get(format!("{}/{}/{}", self.server_url, "api/v1/files", path))
+            .get(url)
             .bearer_auth(&self.token)
             .send()
             .await?;
@@ -68,9 +74,11 @@ impl SyncClient {
     }
 
     pub async fn delete_file(&self, path: &str) -> anyhow::Result<DeleteFileResponse> {
+        let url = format!("{}/{}/{}", self.server_url, "api/v1/files", path);
+        tracing::debug!("request: {} {}", "delete", &url);
         let resp = self
             .client
-            .delete(format!("{}/{}/{}", self.server_url, "api/v1/files", path))
+            .delete(url)
             .bearer_auth(&self.token)
             .send()
             .await?;

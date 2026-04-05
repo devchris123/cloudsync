@@ -34,11 +34,12 @@ pub async fn push(
         }
         let resp = sync_client.create_file(&path, bytes).await?;
         let sync_record = SyncRecord {
-            path,
+            path: path.clone(),
             local_hash: hash,
             server_version: resp.file.version,
         };
         db::put(db, sync_record)?;
+        println!("pushed: {}", &path);
     }
 
     let sync_records = db::list(db)?;
@@ -46,6 +47,7 @@ pub async fn push(
         if !sync_root.join(&sr.path).exists() {
             sync_client.delete_file(&sr.path).await?;
             db::delete(db, &sr.path)?;
+            println!("deleted (server): {}", &sr.path);
         }
     }
     Ok(())
@@ -88,11 +90,12 @@ pub async fn pull(
         };
         std::fs::write(&sync_root.join(&file.path), &content)?;
         let sync_record = SyncRecord {
-            path: file.path,
+            path: file.path.clone(),
             local_hash: hash_bytes(&content),
             server_version: file.version,
         };
         db::put(db, sync_record)?;
+        println!("pulled: {}", &file.path);
     }
     Ok(())
 }
