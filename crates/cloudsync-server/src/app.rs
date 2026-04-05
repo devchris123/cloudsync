@@ -29,6 +29,7 @@ struct AppError(anyhow::Error);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
+        tracing::error!("{}", self.0);
         (StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()).into_response()
     }
 }
@@ -64,8 +65,10 @@ async fn post_file(
     let content = content.unwrap();
 
     let content_hash: String = storage::write(&state.storage_dir, &content)?;
+    tracing::info!("file stored: {} (hash: {})", path, content_hash);
     let db = state.db;
     let file_meta = db::put(&db, &path, content.len() as u64, &content_hash)?;
+    tracing::info!("metadata saved: {} (version: {})", path, file_meta.version);
 
     Ok(Json(CreateFileResponse { file: file_meta }))
 }
@@ -77,6 +80,7 @@ async fn delete_file(
 ) -> Result<Json<DeleteFileResponse>, AppError> {
     let db = state.db;
     db::delete(&db, &path)?;
+    tracing::info!("file marked as deleted: {}", path);
     Ok(Json(DeleteFileResponse {}))
 }
 
@@ -88,8 +92,10 @@ async fn get_file(
     let db: Arc<Database> = state.db;
     let file_meta = db::get(&db, &path)?;
     let Some(file_meta) = file_meta else {
+        tracing::warn!("metadata not found: {}", path);
         return Err(AppError(anyhow::anyhow!("not found")));
     };
+    tracing::debug!("metadata retrieved: {} (version: {})", path, file_meta.version);
     let content_hash = file_meta.content_hash;
     let content = storage::read(&state.storage_dir, &content_hash)?;
     Ok(content)
@@ -110,11 +116,14 @@ async fn auth_layer(
     let headers = request.headers();
     let auth_header = headers.get("Authorization");
     let Some(auth_header) = auth_header else {
+        tracing::warn!("access denied: no authorization header");
         return Err(StatusCode::FORBIDDEN);
     };
     if auth_header.to_str().unwrap() != format!("Bearer {}", state.token) {
+        tracing::warn!("access denied: token invalid");
         return Err(StatusCode::FORBIDDEN);
     }
+    tracing::trace!("access granted");
     Ok(next.run(request).await)
 }
 
