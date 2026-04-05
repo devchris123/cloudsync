@@ -18,13 +18,16 @@ impl SyncClient {
     pub async fn list_files(&self) -> anyhow::Result<ListFilesResponse> {
         let url = format!("{}/{}", self.server_url, "api/v1/files");
         tracing::debug!("request: {} {}", "get", &url);
-        let resp = self
-            .client
-            .get(url)
-            .bearer_auth(&self.token)
-            .send()
-            .await?;
+        let resp = self.client.get(url).bearer_auth(&self.token).send().await?;
+        let status = resp.status();
         let bytes = resp.bytes().await?;
+        if !status.is_success() {
+            anyhow::bail!(
+                "Server error {}: {}",
+                status,
+                String::from_utf8_lossy(&bytes)
+            )
+        }
         Ok(serde_json::from_slice::<ListFilesResponse>(&bytes)?)
     }
 
@@ -63,13 +66,12 @@ impl SyncClient {
     pub async fn get_file(&self, path: &str) -> anyhow::Result<Vec<u8>> {
         let url = format!("{}/{}/{}", self.server_url, "api/v1/files", path);
         tracing::debug!("request: {} {}", "get", &url);
-        let resp = self
-            .client
-            .get(url)
-            .bearer_auth(&self.token)
-            .send()
-            .await?;
+        let resp = self.client.get(url).bearer_auth(&self.token).send().await?;
+        let status = resp.status();
         let bytes = resp.bytes().await?;
+        if !status.is_success() {
+            anyhow::bail!("Server error {}: {}", status, String::from_utf8_lossy(&bytes))
+        }
         Ok(bytes.to_vec())
     }
 
@@ -82,7 +84,11 @@ impl SyncClient {
             .bearer_auth(&self.token)
             .send()
             .await?;
+        let status = resp.status();
         let bytes = resp.bytes().await?;
+        if !status.is_success() {
+            anyhow::bail!("Server error {}: {}", status, String::from_utf8_lossy(&bytes))
+        }
         Ok(serde_json::from_slice::<DeleteFileResponse>(&bytes)?)
     }
 }
