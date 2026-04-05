@@ -7,12 +7,18 @@ pub struct SyncClient {
 }
 
 impl SyncClient {
-    pub fn new(server_url: String, token: String) -> Self {
+    pub fn new(server_url: &str, token: String) -> Self {
         SyncClient {
-            server_url,
+            server_url: server_url.to_string(),
             token,
             client: reqwest::Client::new(),
         }
+    }
+
+    pub async fn health(&self) -> anyhow::Result<()> {
+        let url = format!("{}/health", self.server_url);
+        self.client.get(url).send().await?;
+        Ok(())
     }
 
     pub async fn list_files(&self) -> anyhow::Result<ListFilesResponse> {

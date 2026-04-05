@@ -1,4 +1,7 @@
+use std::path::PathBuf;
+
 use clap::Parser;
+use redb::Database;
 
 use crate::config::ClientConfig;
 
@@ -25,29 +28,32 @@ async fn main() -> anyhow::Result<()> {
             db::open_db(&sync_root)?;
         }
         cli::Command::Push => {
-            let config = load_config()?;
-            let sync_root = config::ClientConfig::find_sync_root()?;
-            let db = db::open_db(&sync_root)?;
-            let sync_client = client::SyncClient::new(config.server_url, config.token);
+            let (db, sync_client, sync_root) = setup().await?;
             sync::push(&db, &sync_client, &sync_root).await?;
         }
         cli::Command::Pull => {
-            let config = load_config()?;
-            let sync_root = config::ClientConfig::find_sync_root()?;
-            let db = db::open_db(&sync_root)?;
-            let sync_client = client::SyncClient::new(config.server_url, config.token);
+            let (db, sync_client, sync_root) = setup().await?;
             sync::pull(&db, &sync_client, &sync_root).await?;
         }
         cli::Command::Status => {
-            let config = load_config()?;
-            let sync_root = config::ClientConfig::find_sync_root()?;
-            let db = db::open_db(&sync_root)?;
-            let sync_client = client::SyncClient::new(config.server_url, config.token);
+            let (db, sync_client, sync_root) = setup().await?;
             sync::status(&db, &sync_client, &sync_root).await?;
         }
     }
 
     Ok(())
+}
+
+async fn setup() -> anyhow::Result<(Database, client::SyncClient, PathBuf)> {
+    let config = load_config()?;
+    let sync_root = config::ClientConfig::find_sync_root()?;
+    let db = db::open_db(&sync_root)?;
+    let sync_client = client::SyncClient::new(&config.server_url, config.token);
+    sync_client
+        .health()
+        .await
+        .map_err(|_| anyhow::anyhow!("Cannot connect to server at {}", &config.server_url))?;
+    Ok((db, sync_client, sync_root))
 }
 
 fn load_config() -> anyhow::Result<ClientConfig> {
