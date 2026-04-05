@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::db;
 use crate::scanner::{self, scan_dir};
 
+#[allow(async_fn_in_trait)]
 pub trait SyncApi {
     async fn list_files(&self) -> anyhow::Result<ListFilesResponse>;
     async fn create_file(&self, path: &str, content: Vec<u8>)

@@ -14,5 +14,9 @@ reqwest = { workspace = true }
 redb = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-tempfile = "3"
 chrono = { workspace = true }
+
+[dev-dependencies]
+cloudsync-server = { path = "../cloudsync-server" }
+tempfile = "3"
+axum = "0.8"

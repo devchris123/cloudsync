@@ -5,12 +5,7 @@ use redb::Database;
 
 use crate::config::ClientConfig;
 
-mod cli;
-mod client;
-mod config;
-mod db;
-mod scanner;
-mod sync;
+use cloudsync_client::{cli, client, config, db, sync};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

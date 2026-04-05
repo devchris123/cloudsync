@@ -1,9 +1,7 @@
 use clap::Parser;
 
-mod app;
 mod cli;
-mod db;
-mod storage;
+use cloudsync_server::app;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

@@ -278,9 +278,11 @@ name = "cloudsync-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "chrono",
  "clap",
  "cloudsync-common",
+ "cloudsync-server",
  "redb",
  "reqwest",
  "serde",
