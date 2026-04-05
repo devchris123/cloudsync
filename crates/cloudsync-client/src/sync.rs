@@ -126,10 +126,19 @@ async fn pull_single_file(
                 let local_content = std::fs::read(local_path)?;
                 let hash = hash_bytes(&local_content);
                 if hash != record.local_hash {
-                    println!(
-                        "Conflict: {} changed locally and on server, skipping",
-                        file.path
-                    );
+                    println!("Conflict: {} changed locally and on server", file.path);
+                    let server_content = sync_client.get_file(&file.path).await?;
+                    let path = std::path::Path::new(&file.path);
+                    let stem = path.file_stem().unwrap_or_default().to_str().unwrap();
+                    let ext = path
+                        .extension()
+                        .map(|e| format!(".{}", e.to_str().unwrap()))
+                        .unwrap_or_default();
+                    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S");
+                    let conflict_path = format!("{}.conflict.{}{}", stem, timestamp, ext);
+                    let conflict_path = sync_root.join(&file.path).with_file_name(conflict_path);
+                    std::fs::write(&conflict_path, server_content)?;
+                    println!("Conflict: resolve conflict in {}", conflict_path.display());
                     return Ok(());
                 }
             }
@@ -442,16 +451,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_pull_skips_conflict() {
+    async fn test_pull_records_conflict() {
         let (db, mock_client, temp_dir) = setup();
-        let file0 = temp_dir.path().join("file0");
+        let subdir = temp_dir.path().join("subdir");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let file0 = subdir.join("file0");
         let bytes: &[u8; 11] = b"hello world";
         std::fs::write(file0, bytes).unwrap();
 
-        let file_meta = make_file_meta("file0", 2);
+        let file_meta = make_file_meta("subdir/file0", 2);
 
         let sync_record = SyncRecord {
-            path: "file0".to_string(),
+            path: "subdir/file0".to_string(),
             local_hash: "somethingelse".to_string(),
             server_version: 1,
         };
@@ -461,7 +472,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(*mock_client.get_count.borrow(), 0);
+        assert_eq!(*mock_client.get_count.borrow(), 1);
+        let conflict_exists = std::fs::read_dir(subdir).unwrap().into_iter().any(|f| {
+            f.unwrap()
+                .file_name()
+                .into_string()
+                .unwrap()
+                .contains("file0.conflict")
+        });
+        assert!(conflict_exists);
     }
 
     fn make_file_meta(path: &str, version: u64) -> FileMeta {
