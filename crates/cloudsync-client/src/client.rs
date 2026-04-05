@@ -70,7 +70,11 @@ impl SyncClient {
         let status = resp.status();
         let bytes = resp.bytes().await?;
         if !status.is_success() {
-            anyhow::bail!("Server error {}: {}", status, String::from_utf8_lossy(&bytes))
+            anyhow::bail!(
+                "Server error {}: {}",
+                status,
+                String::from_utf8_lossy(&bytes)
+            )
         }
         Ok(bytes.to_vec())
     }
@@ -87,7 +91,11 @@ impl SyncClient {
         let status = resp.status();
         let bytes = resp.bytes().await?;
         if !status.is_success() {
-            anyhow::bail!("Server error {}: {}", status, String::from_utf8_lossy(&bytes))
+            anyhow::bail!(
+                "Server error {}: {}",
+                status,
+                String::from_utf8_lossy(&bytes)
+            )
         }
         Ok(serde_json::from_slice::<DeleteFileResponse>(&bytes)?)
     }

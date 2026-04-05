@@ -95,7 +95,11 @@ async fn get_file(
         tracing::warn!("metadata not found: {}", path);
         return Err(AppError(anyhow::anyhow!("not found")));
     };
-    tracing::debug!("metadata retrieved: {} (version: {})", path, file_meta.version);
+    tracing::debug!(
+        "metadata retrieved: {} (version: {})",
+        path,
+        file_meta.version
+    );
     let content_hash = file_meta.content_hash;
     let content = storage::read(&state.storage_dir, &content_hash)?;
     Ok(content)
