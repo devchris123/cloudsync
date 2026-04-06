@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use cloudsync_common::{
-    CreateFileResponse, DeleteFileResponse, FileMeta, ListFilesResponse, hash_bytes,
+    CreateFileResponse, DeleteFileResponse, FileMeta, ListFilesResponse, hash_bytes, hash_file,
 };
 use redb::Database;
 use serde::{Deserialize, Serialize};
@@ -123,8 +123,7 @@ async fn pull_single_file(
         if record.server_version < file.version {
             let local_path = &sync_root.join(&file.path);
             if local_path.exists() {
-                let local_content = std::fs::read(local_path)?;
-                let hash = hash_bytes(&local_content);
+                let hash = hash_file(local_path)?;
                 if hash != record.local_hash {
                     println!("Conflict: {} changed locally and on server", file.path);
                     let server_content = sync_client.get_file(&file.path).await?;
@@ -172,7 +171,6 @@ pub async fn status(
 
     let server_files = sync_client.list_files().await?.files;
     for file in files.iter() {
-        let content = std::fs::read(file)?;
         let path_str = file.strip_prefix(sync_root)?.to_str().unwrap().to_string();
         let sync_record = db::get(db, &path_str)?;
 
@@ -181,7 +179,7 @@ pub async fn status(
             continue;
         };
         let server_hash = server_files.iter().find(|f| f.path == path_str);
-        let hash = hash_bytes(&content);
+        let hash = hash_file(file)?;
         if hash != sync_record.local_hash {
             if let Some(sf) = server_hash
                 && sf.version > sync_record.server_version

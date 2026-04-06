@@ -4,6 +4,8 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use std::io::Read;
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FileMeta {
     pub path: String,
@@ -71,9 +73,23 @@ pub struct DeleteFileRequest {
 #[derive(Serialize, Deserialize)]
 pub struct DeleteFileResponse {}
 
+/// Hashes a file using BLAKE3 with streaming 4MB reads.
+/// This avoids filling up memory when working large files.
 pub fn hash_file(fp: &Path) -> Result<String> {
-    let bytes = std::fs::read(fp)?;
-    Ok(hash_bytes(&bytes))
+    let mut file = std::fs::File::open(fp)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; 4 * 1024 * 1024]; // 4 MB
+
+    loop {
+        let bytes_read = file.read(&mut buf)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buf[..bytes_read]);
+    }
+
+    let res = hasher.finalize();
+    Ok(res.to_hex().to_string())
 }
 
 pub fn hash_bytes(bytes: &[u8]) -> String {
@@ -107,6 +123,19 @@ mod tests {
 
         let hash1 = hash_file(&path1).unwrap();
         let hash2 = hash_file(&path2).unwrap();
+
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn streaming_matches_bytes() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "hello").unwrap();
+
+        let hash1 = hash_file(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let hash2 = hash_bytes(&bytes);
 
         assert_eq!(hash1, hash2);
     }
