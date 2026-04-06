@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      packages: write
     steps:
       - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -23,3 +24,34 @@ jobs:
             --generate-notes \
             target/release/cloudsync-client \
             target/release/cloudsync-server
+      - name: Login to GHCR
+        run: echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Build and push Docker image
+        run: |
+          docker build -t ghcr.io/devchris123/cloudsync-server:${{ github.ref_name }} \
+                       -t ghcr.io/devchris123/cloudsync-server:latest .
+          docker push ghcr.io/devchris123/cloudsync-server:${{ github.ref_name }}
+          docker push ghcr.io/devchris123/cloudsync-server:latest
+      - name: Deploy to server
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.CLOUDSYNC_HETZNER_PRIVATE_KEY }}
+          CLOUDSYNC_TOKEN: ${{ secrets.CLOUDSYNC_TOKEN }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key root@46.224.102.7 << EOF
+            docker pull ghcr.io/devchris123/cloudsync-server:${{ github.ref_name }}
+            docker stop cloudsync-server || true
+            docker rm cloudsync-server || true
+            docker run -d --init --name cloudsync-server \
+              -p 3050:3050 \
+              -v /mnt/volume-cloudsync/cloudsync:/data \
+              -e CLOUDSYNC_TOKEN=$CLOUDSYNC_TOKEN \
+              -e CLOUDSYNC_STORAGE_DIR=/data/files \
+              -e CLOUDSYNC_DBNAME=/data/data.redb \
+              -e CLOUDSYNC_HOST=0.0.0.0 \
+              -e RUST_LOG=cloudsync_server=info \
+              --restart unless-stopped \
+              ghcr.io/devchris123/cloudsync-server:${{ github.ref_name }}
+          EOF
