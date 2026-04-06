@@ -13,6 +13,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", args.host, args.port))
         .await
         .unwrap();
+    tracing::info!("server listening on {}:{}", args.host, args.port);
     axum::serve(listener, app).await.unwrap();
     Ok(())
 }
