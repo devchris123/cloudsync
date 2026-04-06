@@ -14,6 +14,12 @@ pub struct Args {
         default_value = "cloudsync/data/files"
     )]
     pub storage_dir: String,
+    #[arg(
+        long,
+        env = "CLOUDSYNC_STAGING_DIR",
+        default_value = "cloudsync/data/staging"
+    )]
+    pub staging_dir: String,
     #[arg(long, env = "CLOUDSYNC_DBNAME", default_value = "data.redb")]
     pub dbname: String,
 }

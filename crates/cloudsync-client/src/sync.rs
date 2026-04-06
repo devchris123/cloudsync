@@ -1,13 +1,17 @@
+use std::io::Read;
 use std::path::Path;
 
 use cloudsync_common::{
-    CreateFileResponse, DeleteFileResponse, FileMeta, ListFilesResponse, hash_bytes, hash_file,
+    CreateFileResponse, DeleteFileResponse, FileMeta, FinalizeUploadResponse, GetUploadResponse,
+    InitUploadRequest, InitUploadResponse, ListFilesResponse, hash_bytes, hash_file,
 };
 use redb::Database;
 use serde::{Deserialize, Serialize};
 
 use crate::db;
 use crate::scanner::{self, scan_dir};
+
+pub const CHUNK_SIZE: u64 = 4 * 1024 * 1024;
 
 #[allow(async_fn_in_trait)]
 pub trait SyncApi {
@@ -16,6 +20,15 @@ pub trait SyncApi {
     -> anyhow::Result<CreateFileResponse>;
     async fn get_file(&self, path: &str) -> anyhow::Result<Vec<u8>>;
     async fn delete_file(&self, path: &str) -> anyhow::Result<DeleteFileResponse>;
+    async fn init_upload(&self, request: InitUploadRequest) -> anyhow::Result<InitUploadResponse>;
+    async fn send_chunk(
+        &self,
+        upload_id: &str,
+        chunk_index: u32,
+        content: Vec<u8>,
+    ) -> anyhow::Result<()>;
+    async fn get_upload(&self, upload_id: &str) -> anyhow::Result<GetUploadResponse>;
+    async fn finalize_upload(&self, upload_id: &str) -> anyhow::Result<FinalizeUploadResponse>;
 }
 
 #[derive(Serialize, Deserialize)]
@@ -34,9 +47,19 @@ pub async fn push(
     let files = scanner::scan_dir(sync_root, &ignored)?;
 
     for file in files.iter() {
-        if let Err(e) = push_single_file(db, sync_client, sync_root, file).await {
+        let total_size = file.metadata()?.len();
+        if total_size < CHUNK_SIZE {
+            if let Err(e) = push_single_file(db, sync_client, sync_root, file).await {
+                println!(
+                    "error pushing {}: {}",
+                    &file.to_str().unwrap().to_string(),
+                    e
+                );
+                continue;
+            }
+        } else if let Err(e) = push_single_file_chunked(db, sync_client, sync_root, file).await {
             println!(
-                "error pushing {}: {}",
+                "error pushing chunked {}: {}",
                 &file.to_str().unwrap().to_string(),
                 e
             );
@@ -60,25 +83,76 @@ async fn push_single_file(
     db: &Database,
     sync_client: &impl SyncApi,
     sync_root: &Path,
-    file: &Path,
+    local_path: &Path,
 ) -> anyhow::Result<()> {
-    let bytes = std::fs::read(file)?;
+    let bytes = std::fs::read(local_path)?;
     let hash = hash_bytes(&bytes);
-    let path = file.strip_prefix(sync_root)?.to_str().unwrap().to_string();
-    let sync_record = db::get(db, &path)?;
+    let rel_path: String = local_path
+        .strip_prefix(sync_root)?
+        .to_str()
+        .unwrap()
+        .to_string();
+    let sync_record = db::get(db, &rel_path)?;
     if let Some(sr) = sync_record
         && sr.local_hash == hash
     {
         return Ok(());
     }
-    let resp = sync_client.create_file(&path, bytes).await?;
+    let resp = sync_client.create_file(&rel_path, bytes).await?;
     let sync_record = SyncRecord {
-        path: path.clone(),
+        path: rel_path.clone(),
         local_hash: hash,
         server_version: resp.file.version,
     };
     db::put(db, sync_record)?;
-    println!("pushed: {}", &path);
+    println!("pushed: {}", &rel_path);
+    Ok(())
+}
+
+pub async fn push_single_file_chunked(
+    db: &Database,
+    sync_client: &impl SyncApi,
+    sync_root: &Path,
+    local_path: &Path,
+) -> anyhow::Result<()> {
+    let total_size = local_path.metadata()?.len();
+    let chunk_count = total_size.div_ceil(CHUNK_SIZE);
+    let hash = hash_file(local_path)?;
+    let rel_path = local_path
+        .strip_prefix(sync_root)?
+        .to_str()
+        .unwrap()
+        .to_string();
+    let sync_record = db::get(db, &rel_path)?;
+    if let Some(sr) = sync_record
+        && sr.local_hash == hash
+    {
+        return Ok(());
+    }
+    let upload = sync_client
+        .init_upload(InitUploadRequest {
+            path: rel_path.clone(),
+            total_size,
+            total_hash: hash.clone(),
+            chunk_count,
+        })
+        .await?;
+    let mut file = std::fs::File::open(local_path)?;
+    for i in 0..chunk_count {
+        let mut buf = Vec::new();
+        (&mut file).take(CHUNK_SIZE).read_to_end(&mut buf)?;
+        sync_client
+            .send_chunk(&upload.upload_id, i as u32, buf)
+            .await?;
+    }
+    let resp = sync_client.finalize_upload(&upload.upload_id).await?;
+    let sync_record = SyncRecord {
+        path: rel_path.clone(),
+        local_hash: hash,
+        server_version: resp.file.version,
+    };
+    db::put(db, sync_record)?;
+    println!("pushed: {}", &rel_path);
     Ok(())
 }
 
@@ -221,6 +295,8 @@ pub async fn status(
 mod tests {
     use std::cell::RefCell;
 
+    use chrono::Utc;
+    use cloudsync_common::Upload;
     use tempfile::TempDir;
 
     use crate::db::open_db;
@@ -233,6 +309,10 @@ mod tests {
         create_count: RefCell<u64>,
         get_count: RefCell<u64>,
         delete_count: RefCell<u64>,
+        init_upload_count: RefCell<u64>,
+        send_chunk_count: RefCell<u64>,
+        get_upload_count: RefCell<u64>,
+        finalize_upload_count: RefCell<u64>,
         fail_path: RefCell<Option<String>>,
     }
 
@@ -244,6 +324,10 @@ mod tests {
                 create_count: RefCell::new(0),
                 get_count: RefCell::new(0),
                 delete_count: RefCell::new(0),
+                init_upload_count: RefCell::new(0),
+                send_chunk_count: RefCell::new(0),
+                get_upload_count: RefCell::new(0),
+                finalize_upload_count: RefCell::new(0),
                 fail_path: RefCell::new(None),
             }
         }
@@ -295,6 +379,60 @@ mod tests {
             *self.delete_count.borrow_mut() += 1;
             Ok(DeleteFileResponse {})
         }
+
+        async fn init_upload(
+            &self,
+            _request: InitUploadRequest,
+        ) -> anyhow::Result<InitUploadResponse> {
+            *self.init_upload_count.borrow_mut() += 1;
+            Ok(InitUploadResponse {
+                upload_id: "".to_string(),
+            })
+        }
+
+        async fn send_chunk(
+            &self,
+            _upload_id: &str,
+            _chunk_index: u32,
+            _content: Vec<u8>,
+        ) -> anyhow::Result<()> {
+            *self.send_chunk_count.borrow_mut() += 1;
+            Ok(())
+        }
+
+        async fn get_upload(&self, _upload_id: &str) -> anyhow::Result<GetUploadResponse> {
+            *self.get_upload_count.borrow_mut() += 1;
+            Ok(GetUploadResponse {
+                upload: Upload {
+                    path: "".to_string(),
+                    total_size: 10,
+                    upload_id: "".to_string(),
+                    total_hash: "".to_string(),
+                    chunk_count: 1,
+                    chunks_received: Vec::new(),
+                    created_at: Utc::now(),
+                    modified_at: Utc::now(),
+                },
+            })
+        }
+
+        async fn finalize_upload(
+            &self,
+            _upload_id: &str,
+        ) -> anyhow::Result<FinalizeUploadResponse> {
+            *self.finalize_upload_count.borrow_mut() += 1;
+            Ok(FinalizeUploadResponse {
+                file: FileMeta {
+                    path: "".to_string(),
+                    size: 0,
+                    content_hash: "".to_string(),
+                    version: 1,
+                    is_deleted: false,
+                    created_at: Utc::now(),
+                    modified_at: Utc::now(),
+                },
+            })
+        }
     }
 
     fn setup() -> (Database, MockClient, TempDir) {
@@ -319,6 +457,24 @@ mod tests {
         let record = db::get(&db, "file0").unwrap();
         assert!(record.is_some());
         assert_eq!(*mock_client.create_count.borrow(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_push_single_file_chunked() {
+        let (db, mock_client, temp_dir) = setup();
+        let file = temp_dir.path().join("file0");
+        let bytes = vec![0u8; 10 * 1024 * 1024];
+        std::fs::write(&file, bytes).unwrap();
+
+        push_single_file_chunked(&db, &mock_client, temp_dir.path(), &file)
+            .await
+            .unwrap();
+
+        let record = db::get(&db, "file0").unwrap();
+        assert!(record.is_some());
+        assert_eq!(*mock_client.init_upload_count.borrow(), 1);
+        assert_eq!(*mock_client.send_chunk_count.borrow(), 3);
+        assert_eq!(*mock_client.finalize_upload_count.borrow(), 1);
     }
 
     #[tokio::test]

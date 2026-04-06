@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use std::io::Read;
 
+pub mod upload;
+pub use upload::*;
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FileMeta {
     pub path: String,
