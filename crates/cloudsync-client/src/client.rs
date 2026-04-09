@@ -2,8 +2,10 @@ use cloudsync_common::{
     CreateFileResponse, DeleteFileResponse, FinalizeUploadResponse, GetUploadResponse,
     InitUploadRequest, InitUploadResponse, ListFilesResponse,
 };
+use tokio::io::AsyncRead;
 
 use crate::sync::SyncApi;
+use futures::TryStreamExt;
 
 pub struct SyncClient {
     server_url: String,
@@ -76,20 +78,22 @@ impl SyncApi for SyncClient {
         Ok(serde_json::from_slice::<CreateFileResponse>(&bytes)?)
     }
 
-    async fn get_file(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+    async fn get_file(&self, path: &str) -> anyhow::Result<Box<dyn AsyncRead + Unpin + Send>> {
         let url = format!("{}/{}/{}", self.server_url, "api/v1/files", path);
         tracing::debug!("request: {} {}", "get", &url);
         let resp = self.client.get(url).bearer_auth(&self.token).send().await?;
         let status = resp.status();
-        let bytes = resp.bytes().await?;
         if !status.is_success() {
             anyhow::bail!(
                 "Server error {}: {}",
                 status,
-                String::from_utf8_lossy(&bytes)
+                String::from_utf8_lossy(&resp.bytes().await?)
             )
         }
-        Ok(bytes.to_vec())
+        let bytes_stream = resp.bytes_stream();
+        let stream = bytes_stream.map_err(std::io::Error::other);
+        let reader = tokio_util::io::StreamReader::new(stream);
+        Ok(Box::new(reader))
     }
 
     async fn delete_file(&self, path: &str) -> anyhow::Result<DeleteFileResponse> {

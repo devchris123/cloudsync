@@ -13,8 +13,10 @@ anyhow = { workspace = true }
 reqwest = { workspace = true }
 redb = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
+futures = "0.3"
 
 [dev-dependencies]
 cloudsync-server = { path = "../cloudsync-server" }
