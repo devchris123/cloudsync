@@ -63,14 +63,14 @@ These are listed in dependency order: large files enables UI upload progress, ea
 
 ### 2.1 Auto-generate auth token on first run
 - Make `--token` / `CLOUDSYNC_TOKEN` optional
-- If no token provided: generate random 256-bit hex token, write to `{storage_dir}/.token`, print to stdout
+- If no token provided: generate random 256-bit hex token, write to `{storage_dir}/.token`, print file path to stdout (avoids token leaking into logs/shell history)
 - On subsequent starts: read from `.token` file if env var not set
 - Add `rand` dependency
 - Files: `crates/cloudsync-server/src/cli.rs`, `crates/cloudsync-server/src/main.rs`
 
 ### 2.2 docker-compose.yml
 - Single service, GHCR image, port 3050, named volume to `/data`
-- No token needed — auto-generates on first run, visible in `docker compose logs`
+- No token needed — auto-generates on first run, admin reads from `.token` file in the volume
 - New file: `docker-compose.yml`
 
 ### 2.3 Improved health endpoint
