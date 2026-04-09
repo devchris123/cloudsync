@@ -40,19 +40,10 @@ jobs:
           mkdir -p ~/.ssh
           echo "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key docker-compose.yml root@46.224.102.7:~/docker-compose.yml
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key root@46.224.102.7 << EOF
-            docker pull ghcr.io/devchris123/cloudsync-server:${{ github.ref_name }}
-            docker stop cloudsync-server || true
-            docker rm cloudsync-server || true
-            docker run -d --init --name cloudsync-server \
-              -p 3050:3050 \
-              -v /mnt/volume-cloudsync/cloudsync:/data \
-              -e CLOUDSYNC_TOKEN=$CLOUDSYNC_TOKEN \
-              -e CLOUDSYNC_STORAGE_DIR=/data/files \
-              -e CLOUDSYNC_STAGING_DIR=/data/staging \
-              -e CLOUDSYNC_DBNAME=/data/data.redb \
-              -e CLOUDSYNC_HOST=0.0.0.0 \
-              -e RUST_LOG=cloudsync_server=info \
-              --restart unless-stopped \
-              ghcr.io/devchris123/cloudsync-server:${{ github.ref_name }}
+            CLOUDSYNC_DOCKER_TAG=${{ github.ref_name }} \
+            CLOUDSYNC_MOUNT_DIR=/mnt/volume-cloudsync/cloudsync \
+            CLOUDSYNC_TOKEN=$CLOUDSYNC_TOKEN \
+            docker compose -f ~/docker-compose.yml up -d
           EOF

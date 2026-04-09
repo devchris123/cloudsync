@@ -17,15 +17,17 @@ A self-hosted Dropbox alternative written in Rust. CLI-driven manual sync with c
 
 ### Server
 
+Create a `.env` file:
+
+```
+CLOUDSYNC_TOKEN=your-secret-token
+CLOUDSYNC_MOUNT_DIR=/path/to/data
+```
+
+Then run:
+
 ```sh
-docker run -d \
-  -p 3050:3050 \
-  -v /path/to/data:/data \
-  -e CLOUDSYNC_TOKEN=your-secret-token \
-  -e CLOUDSYNC_STORAGE_DIR=/data/files \
-  -e CLOUDSYNC_STAGING_DIR=/data/staging \
-  -e CLOUDSYNC_DBNAME=/data/data.redb \
-  ghcr.io/devchris123/cloudsync:latest
+docker compose up -d
 ```
 
 ### Client

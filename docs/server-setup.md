@@ -70,9 +70,5 @@ The release workflow (`.github/workflows/release.yml`) handles:
 
 - Building and pushing the Docker image to ghcr.io
 - SSHing into the server
-- Pulling the latest image
-- Running the container with:
-  - Volume: `/mnt/volume-cloudsync/cloudsync:/data`
-  - Port: `3050`
-  - `--init` for signal handling
-  - `--restart unless-stopped` for auto-restart
+- Copying `docker-compose.yml` to the server
+- Running `docker compose up -d` with env vars for image tag, mount dir, and token

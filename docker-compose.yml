@@ -1,0 +1,15 @@
+services:
+  cloudsync:
+    image: ghcr.io/devchris123/cloudsync-server:${CLOUDSYNC_DOCKER_TAG:-latest}
+    ports:
+      - "3050:3050"
+    volumes:
+      - ${CLOUDSYNC_MOUNT_DIR}:/data
+    environment:
+      - CLOUDSYNC_TOKEN=$CLOUDSYNC_TOKEN
+      - CLOUDSYNC_STORAGE_DIR=/data/files
+      - CLOUDSYNC_STAGING_DIR=/data/staging
+      - CLOUDSYNC_DBNAME=/data/data.redb
+      - CLOUDSYNC_HOST=0.0.0.0
+      - RUST_LOG=cloudsync_server=info
+    restart: unless-stopped
