@@ -17,6 +17,23 @@ docs/
   server-setup.md     — Hetzner VPS deployment guide
 ```
 
+## Commit Style
+
+- **Subject**: concise imperative one-liner (~50 chars), capitalized, no trailing period
+- **Body**: explain **why** the change was made, not what changed — the diff shows that. Keep it brief (2-4 sentences). Focus on motivation, trade-offs, and what it enables.
+- Commits should be small and self-contained; each must leave the code in a working state
+- If changes span unrelated concerns, split into multiple commits
+
+Good body example:
+> Chunked upload speeds up uploads for large files (>4MB up to ~GB)
+> by sending file bytes in chunks. The server reassembles on finalize.
+> Does not block implementing retry on top of it.
+
+Bad body example (just repeating the diff):
+> - Implement CRUD in upload_db for the new upload table
+> - Implement chunk endpoints for parallel upload
+> - Implement client logic for chunked upload
+
 ## Build & Test
 
 ```bash
