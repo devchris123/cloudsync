@@ -7,6 +7,7 @@ use cloudsync_common::{
 };
 use redb::Database;
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncRead;
 
 use crate::db;
 use crate::scanner::{self, scan_dir};
@@ -18,7 +19,7 @@ pub trait SyncApi {
     async fn list_files(&self) -> anyhow::Result<ListFilesResponse>;
     async fn create_file(&self, path: &str, content: Vec<u8>)
     -> anyhow::Result<CreateFileResponse>;
-    async fn get_file(&self, path: &str) -> anyhow::Result<Vec<u8>>;
+    async fn get_file(&self, path: &str) -> anyhow::Result<Box<dyn AsyncRead + Unpin + Send>>;
     async fn delete_file(&self, path: &str) -> anyhow::Result<DeleteFileResponse>;
     async fn init_upload(&self, request: InitUploadRequest) -> anyhow::Result<InitUploadResponse>;
     async fn send_chunk(
@@ -202,7 +203,6 @@ async fn pull_single_file(
                 let hash = hash_file(local_path)?;
                 if hash != record.local_hash {
                     println!("Conflict: {} changed locally and on server", file_meta.path);
-                    let server_content = sync_client.get_file(&file_meta.path).await?;
                     let rel_path: &Path = std::path::Path::new(&file_meta.path);
                     let stem = rel_path.file_stem().unwrap_or_default().to_str().unwrap();
                     let ext = rel_path
@@ -214,23 +214,26 @@ async fn pull_single_file(
                     let conflict_path = sync_root
                         .join(&file_meta.path)
                         .with_file_name(conflict_path);
-                    std::fs::write(&conflict_path, server_content)?;
+                    let mut file = tokio::fs::File::create(&conflict_path).await?;
+                    let mut stream_reader = sync_client.get_file(&file_meta.path).await?;
+                    tokio::io::copy(&mut stream_reader, &mut file).await?;
                     println!("Conflict: resolve conflict in {}", conflict_path.display());
                     return Ok(());
                 }
             }
         }
     }
-    let content = sync_client.get_file(&file_meta.path).await?;
     let local_path = &sync_root.join(&file_meta.path);
     let parent_dir = std::path::Path::new(local_path).parent();
     if let Some(parent_dir) = parent_dir {
         std::fs::create_dir_all(parent_dir)?;
     };
-    std::fs::write(local_path, &content)?;
+    let mut stream_reader = sync_client.get_file(&file_meta.path).await?;
+    let mut file = tokio::fs::File::create(local_path).await?;
+    tokio::io::copy(&mut stream_reader, &mut file).await?;
     let sync_record = SyncRecord {
         path: file_meta.path.clone(),
-        local_hash: hash_bytes(&content),
+        local_hash: hash_file(local_path)?,
         server_version: file_meta.version,
     };
     db::put(db, sync_record)?;
@@ -375,12 +378,12 @@ mod tests {
             })
         }
 
-        async fn get_file(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+        async fn get_file(&self, path: &str) -> anyhow::Result<Box<dyn AsyncRead + Unpin + Send>> {
             if self.fail_path.borrow().as_deref() == Some(path) {
                 anyhow::bail!("error");
             }
             *self.get_count.borrow_mut() += 1;
-            Ok(Vec::new())
+            Ok(Box::new(std::io::Cursor::new(Vec::new())))
         }
 
         async fn delete_file(&self, _path: &str) -> anyhow::Result<DeleteFileResponse> {

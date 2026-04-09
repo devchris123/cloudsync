@@ -7,6 +7,7 @@ edition = "2024"
 cloudsync-common = { path = "../cloudsync-common" }
 axum = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 redb = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }

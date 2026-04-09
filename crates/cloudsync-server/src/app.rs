@@ -97,7 +97,7 @@ async fn delete_file(
 async fn get_file(
     State(state): State<AppState>,
     Path(path): Path<String>,
-) -> Result<Vec<u8>, AppError> {
+) -> Result<impl IntoResponse, AppError> {
     let db: Arc<Database> = state.db;
     let file_meta = db::get(&db, &path)?;
     let Some(file_meta) = file_meta else {
@@ -113,8 +113,13 @@ async fn get_file(
         file_meta.version
     );
     let content_hash = file_meta.content_hash;
-    let content = storage::read(&state.storage_dir, &content_hash)?;
-    Ok(content)
+    let file = storage::read_async(&state.storage_dir, &content_hash).await?;
+    let reader_stream = tokio_util::io::ReaderStream::new(file);
+    let headers = [(
+        axum::http::header::CONTENT_LENGTH,
+        file_meta.size.to_string(),
+    )];
+    Ok((headers, axum::body::Body::from_stream(reader_stream)))
 }
 
 async fn create_upload(
@@ -261,7 +266,8 @@ pub fn create_app(state: AppState) -> Router {
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_layer,
-        ));
+        ))
+        .layer(DefaultBodyLimit::max(5 * 1024 * 1024)); // 4MB + overhead
     Router::<AppState>::new()
         .route("/api/v1/health", get(get_health))
         .merge(auth_router)
