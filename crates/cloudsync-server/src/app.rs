@@ -186,12 +186,18 @@ async fn finalize_upload(
         ));
     }
     let staging_dir = std::path::Path::new(&state.staging_dir).join(&upload_id);
+    let storage_path = storage::get_storage_path(&state.storage_dir, &upload.total_hash);
+    std::fs::create_dir_all(storage_path.parent().unwrap())?;
+    let mut storage_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&storage_path)?;
     for chunk_index in 0..upload.chunk_count {
         let chunk_path = staging_dir.join(chunk_index.to_string());
-        let content = std::fs::read(chunk_path)?;
-        storage::write_chunk(&state.storage_dir, &upload.total_hash, &content)?;
+        let mut chunk_file = std::fs::OpenOptions::new().read(true).open(chunk_path)?;
+        std::io::copy(&mut chunk_file, &mut storage_file)?;
     }
-    let storage_path = storage::get_storage_path(&state.storage_dir, &upload.total_hash);
+
     let total_hash = hash_file(&storage_path)?;
     if upload.total_hash != total_hash {
         return Err(AppError(

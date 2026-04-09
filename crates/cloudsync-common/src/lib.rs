@@ -4,8 +4,6 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use std::io::Read;
-
 pub mod upload;
 pub use upload::*;
 
@@ -81,16 +79,7 @@ pub struct DeleteFileResponse {}
 pub fn hash_file(fp: &Path) -> Result<String> {
     let mut file = std::fs::File::open(fp)?;
     let mut hasher = blake3::Hasher::new();
-    let mut buf = vec![0u8; 4 * 1024 * 1024]; // 4 MB
-
-    loop {
-        let bytes_read = file.read(&mut buf)?;
-        if bytes_read == 0 {
-            break;
-        }
-        hasher.update(&buf[..bytes_read]);
-    }
-
+    hasher.update_reader(&mut file)?;
     let res = hasher.finalize();
     Ok(res.to_hex().to_string())
 }
