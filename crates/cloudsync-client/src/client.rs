@@ -1,4 +1,7 @@
-use cloudsync_common::{CreateFileResponse, DeleteFileResponse, ListFilesResponse};
+use cloudsync_common::{
+    CreateFileResponse, DeleteFileResponse, FinalizeUploadResponse, GetUploadResponse,
+    InitUploadRequest, InitUploadResponse, ListFilesResponse,
+};
 
 use crate::sync::SyncApi;
 
@@ -108,5 +111,95 @@ impl SyncApi for SyncClient {
             )
         }
         Ok(serde_json::from_slice::<DeleteFileResponse>(&bytes)?)
+    }
+
+    async fn init_upload(&self, request: InitUploadRequest) -> anyhow::Result<InitUploadResponse> {
+        // Init upload
+        let url = format!("{}/api/v1/uploads", self.server_url);
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(&self.token)
+            .json(&request)
+            .send()
+            .await?;
+        let status = response.status();
+        let resp_bytes = response.bytes().await?;
+        if !status.is_success() {
+            anyhow::bail!(
+                "Server error {}: {}",
+                status,
+                String::from_utf8_lossy(&resp_bytes)
+            )
+        }
+        let resp = serde_json::from_slice::<InitUploadResponse>(&resp_bytes)?;
+        Ok(resp)
+    }
+
+    async fn send_chunk(
+        &self,
+        upload_id: &str,
+        chunk_index: u32,
+        content: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        let url = format!(
+            "{}/api/v1/uploads/{}/chunks/{}",
+            self.server_url, upload_id, chunk_index
+        );
+        let resp = self
+            .client
+            .put(url)
+            .bearer_auth(&self.token)
+            .body(content)
+            .send()
+            .await?;
+        let status = resp.status();
+        let bytes = resp.bytes().await?;
+        if !status.is_success() {
+            anyhow::bail!(
+                "Server error {}: {}",
+                status,
+                String::from_utf8_lossy(&bytes)
+            )
+        }
+        Ok(())
+    }
+
+    async fn get_upload(&self, upload_id: &str) -> anyhow::Result<GetUploadResponse> {
+        // Get status
+        let url = format!("{}/api/v1/uploads/{}", self.server_url, upload_id);
+        let resp = self.client.get(url).bearer_auth(&self.token).send().await?;
+        let status = resp.status();
+        let bytes = resp.bytes().await?;
+        if !status.is_success() {
+            anyhow::bail!(
+                "Server error {}: {}",
+                status,
+                String::from_utf8_lossy(&bytes)
+            )
+        }
+        Ok(serde_json::from_slice::<GetUploadResponse>(&bytes)?)
+    }
+
+    async fn finalize_upload(&self, upload_id: &str) -> anyhow::Result<FinalizeUploadResponse> {
+        // finalize upload
+        let url = format!("{}/api/v1/uploads/{}/finalize", self.server_url, upload_id);
+        let resp = self
+            .client
+            .post(url)
+            .bearer_auth(&self.token)
+            .send()
+            .await?;
+        let status = resp.status();
+        let bytes = resp.bytes().await?;
+        if !status.is_success() {
+            anyhow::bail!(
+                "Server error {}: {}",
+                status,
+                String::from_utf8_lossy(&bytes)
+            )
+        }
+        let file = serde_json::from_slice::<FinalizeUploadResponse>(&bytes)?;
+        Ok(file)
     }
 }

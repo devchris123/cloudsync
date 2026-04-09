@@ -1,13 +1,17 @@
+use std::io::Read;
 use std::path::Path;
 
 use cloudsync_common::{
-    CreateFileResponse, DeleteFileResponse, FileMeta, ListFilesResponse, hash_bytes,
+    CreateFileResponse, DeleteFileResponse, FileMeta, FinalizeUploadResponse, GetUploadResponse,
+    InitUploadRequest, InitUploadResponse, ListFilesResponse, hash_bytes, hash_file,
 };
 use redb::Database;
 use serde::{Deserialize, Serialize};
 
 use crate::db;
 use crate::scanner::{self, scan_dir};
+
+pub const CHUNK_SIZE: u64 = 4 * 1024 * 1024;
 
 #[allow(async_fn_in_trait)]
 pub trait SyncApi {
@@ -16,6 +20,15 @@ pub trait SyncApi {
     -> anyhow::Result<CreateFileResponse>;
     async fn get_file(&self, path: &str) -> anyhow::Result<Vec<u8>>;
     async fn delete_file(&self, path: &str) -> anyhow::Result<DeleteFileResponse>;
+    async fn init_upload(&self, request: InitUploadRequest) -> anyhow::Result<InitUploadResponse>;
+    async fn send_chunk(
+        &self,
+        upload_id: &str,
+        chunk_index: u32,
+        content: Vec<u8>,
+    ) -> anyhow::Result<()>;
+    async fn get_upload(&self, upload_id: &str) -> anyhow::Result<GetUploadResponse>;
+    async fn finalize_upload(&self, upload_id: &str) -> anyhow::Result<FinalizeUploadResponse>;
 }
 
 #[derive(Serialize, Deserialize)]
@@ -31,13 +44,25 @@ pub async fn push(
     sync_root: &Path,
 ) -> anyhow::Result<()> {
     let ignored = scanner::get_ignored(sync_root);
-    let files = scanner::scan_dir(sync_root, &ignored)?;
+    let local_paths = scanner::scan_dir(sync_root, &ignored)?;
 
-    for file in files.iter() {
-        if let Err(e) = push_single_file(db, sync_client, sync_root, file).await {
+    for local_path in local_paths.iter() {
+        let total_size = local_path.metadata()?.len();
+        if total_size < CHUNK_SIZE {
+            if let Err(e) = push_single_file(db, sync_client, sync_root, local_path).await {
+                println!(
+                    "error pushing {}: {}",
+                    &local_path.to_str().unwrap().to_string(),
+                    e
+                );
+                continue;
+            }
+        } else if let Err(e) =
+            push_single_file_chunked(db, sync_client, sync_root, local_path).await
+        {
             println!(
-                "error pushing {}: {}",
-                &file.to_str().unwrap().to_string(),
+                "error pushing chunked {}: {}",
+                &local_path.to_str().unwrap().to_string(),
                 e
             );
             continue;
@@ -60,25 +85,76 @@ async fn push_single_file(
     db: &Database,
     sync_client: &impl SyncApi,
     sync_root: &Path,
-    file: &Path,
+    local_path: &Path,
 ) -> anyhow::Result<()> {
-    let bytes = std::fs::read(file)?;
+    let bytes = std::fs::read(local_path)?;
     let hash = hash_bytes(&bytes);
-    let path = file.strip_prefix(sync_root)?.to_str().unwrap().to_string();
-    let sync_record = db::get(db, &path)?;
+    let rel_path: String = local_path
+        .strip_prefix(sync_root)?
+        .to_str()
+        .unwrap()
+        .to_string();
+    let sync_record = db::get(db, &rel_path)?;
     if let Some(sr) = sync_record
         && sr.local_hash == hash
     {
         return Ok(());
     }
-    let resp = sync_client.create_file(&path, bytes).await?;
+    let resp = sync_client.create_file(&rel_path, bytes).await?;
     let sync_record = SyncRecord {
-        path: path.clone(),
+        path: rel_path.clone(),
         local_hash: hash,
         server_version: resp.file.version,
     };
     db::put(db, sync_record)?;
-    println!("pushed: {}", &path);
+    println!("pushed: {}", &rel_path);
+    Ok(())
+}
+
+pub async fn push_single_file_chunked(
+    db: &Database,
+    sync_client: &impl SyncApi,
+    sync_root: &Path,
+    local_path: &Path,
+) -> anyhow::Result<()> {
+    let total_size = local_path.metadata()?.len();
+    let chunk_count = total_size.div_ceil(CHUNK_SIZE);
+    let hash = hash_file(local_path)?;
+    let rel_path = local_path
+        .strip_prefix(sync_root)?
+        .to_str()
+        .unwrap()
+        .to_string();
+    let sync_record = db::get(db, &rel_path)?;
+    if let Some(sr) = sync_record
+        && sr.local_hash == hash
+    {
+        return Ok(());
+    }
+    let upload = sync_client
+        .init_upload(InitUploadRequest {
+            path: rel_path.clone(),
+            total_size,
+            total_hash: hash.clone(),
+            chunk_count,
+        })
+        .await?;
+    let mut file = std::fs::File::open(local_path)?;
+    for i in 0..chunk_count {
+        let mut buf = Vec::new();
+        (&mut file).take(CHUNK_SIZE).read_to_end(&mut buf)?;
+        sync_client
+            .send_chunk(&upload.upload_id, i as u32, buf)
+            .await?;
+    }
+    let resp = sync_client.finalize_upload(&upload.upload_id).await?;
+    let sync_record = SyncRecord {
+        path: rel_path.clone(),
+        local_hash: hash,
+        server_version: resp.file.version,
+    };
+    db::put(db, sync_record)?;
+    println!("pushed: {}", &rel_path);
     Ok(())
 }
 
@@ -98,10 +174,10 @@ pub async fn pull(
     sync_client: &impl SyncApi,
     sync_root: &Path,
 ) -> anyhow::Result<()> {
-    let files = sync_client.list_files().await?;
-    for file in files.files {
-        if let Err(e) = pull_single_file(db, sync_client, sync_root, &file).await {
-            println!("error pulling {}: {}", &file.path, e);
+    let file_metas = sync_client.list_files().await?.files;
+    for file_meta in file_metas {
+        if let Err(e) = pull_single_file(db, sync_client, sync_root, &file_meta).await {
+            println!("error pulling {}: {}", &file_meta.path, e);
             continue;
         }
     }
@@ -112,31 +188,32 @@ async fn pull_single_file(
     db: &Database,
     sync_client: &impl SyncApi,
     sync_root: &Path,
-    file: &FileMeta,
+    file_meta: &FileMeta,
 ) -> anyhow::Result<()> {
-    let record = db::get(db, &file.path)?;
+    let record = db::get(db, &file_meta.path)?;
 
     if let Some(record) = record {
-        if record.server_version == file.version {
+        if record.server_version == file_meta.version {
             return Ok(());
         }
-        if record.server_version < file.version {
-            let local_path = &sync_root.join(&file.path);
+        if record.server_version < file_meta.version {
+            let local_path = &sync_root.join(&file_meta.path);
             if local_path.exists() {
-                let local_content = std::fs::read(local_path)?;
-                let hash = hash_bytes(&local_content);
+                let hash = hash_file(local_path)?;
                 if hash != record.local_hash {
-                    println!("Conflict: {} changed locally and on server", file.path);
-                    let server_content = sync_client.get_file(&file.path).await?;
-                    let path = std::path::Path::new(&file.path);
-                    let stem = path.file_stem().unwrap_or_default().to_str().unwrap();
-                    let ext = path
+                    println!("Conflict: {} changed locally and on server", file_meta.path);
+                    let server_content = sync_client.get_file(&file_meta.path).await?;
+                    let rel_path: &Path = std::path::Path::new(&file_meta.path);
+                    let stem = rel_path.file_stem().unwrap_or_default().to_str().unwrap();
+                    let ext = rel_path
                         .extension()
                         .map(|e| format!(".{}", e.to_str().unwrap()))
                         .unwrap_or_default();
                     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S");
                     let conflict_path = format!("{}.conflict.{}{}", stem, timestamp, ext);
-                    let conflict_path = sync_root.join(&file.path).with_file_name(conflict_path);
+                    let conflict_path = sync_root
+                        .join(&file_meta.path)
+                        .with_file_name(conflict_path);
                     std::fs::write(&conflict_path, server_content)?;
                     println!("Conflict: resolve conflict in {}", conflict_path.display());
                     return Ok(());
@@ -144,20 +221,20 @@ async fn pull_single_file(
             }
         }
     }
-    let content = sync_client.get_file(&file.path).await?;
-    let path = &sync_root.join(&file.path);
-    let parent_dir = std::path::Path::new(path).parent();
+    let content = sync_client.get_file(&file_meta.path).await?;
+    let local_path = &sync_root.join(&file_meta.path);
+    let parent_dir = std::path::Path::new(local_path).parent();
     if let Some(parent_dir) = parent_dir {
         std::fs::create_dir_all(parent_dir)?;
     };
-    std::fs::write(sync_root.join(&file.path), &content)?;
+    std::fs::write(local_path, &content)?;
     let sync_record = SyncRecord {
-        path: file.path.clone(),
+        path: file_meta.path.clone(),
         local_hash: hash_bytes(&content),
-        server_version: file.version,
+        server_version: file_meta.version,
     };
     db::put(db, sync_record)?;
-    println!("pulled: {}", &file.path);
+    println!("pulled: {}", &file_meta.path);
 
     Ok(())
 }
@@ -168,43 +245,46 @@ pub async fn status(
     sync_root: &Path,
 ) -> anyhow::Result<()> {
     let ignored = &scanner::get_ignored(sync_root);
-    let files = scan_dir(sync_root, ignored)?;
+    let local_files = scan_dir(sync_root, ignored)?;
 
-    let server_files = sync_client.list_files().await?.files;
-    for file in files.iter() {
-        let content = std::fs::read(file)?;
-        let path_str = file.strip_prefix(sync_root)?.to_str().unwrap().to_string();
-        let sync_record = db::get(db, &path_str)?;
+    let file_metas = sync_client.list_files().await?.files;
+    for local_file in local_files.iter() {
+        let rel_path = local_file
+            .strip_prefix(sync_root)?
+            .to_str()
+            .unwrap()
+            .to_string();
+        let sync_record = db::get(db, &rel_path)?;
 
         let Some(sync_record) = sync_record else {
-            println!("{} - new (local)", &path_str);
+            println!("{} - new (local)", &rel_path);
             continue;
         };
-        let server_hash = server_files.iter().find(|f| f.path == path_str);
-        let hash = hash_bytes(&content);
+        let server_hash = file_metas.iter().find(|f| f.path == rel_path);
+        let hash = hash_file(local_file)?;
         if hash != sync_record.local_hash {
             if let Some(sf) = server_hash
                 && sf.version > sync_record.server_version
             {
-                println!("{} - conflict", &path_str);
+                println!("{} - conflict", &rel_path);
                 continue;
             }
-            println!("{} - update (local)", &path_str);
+            println!("{} - update (local)", &rel_path);
             continue;
         }
         if let Some(server_hash) = server_hash
             && server_hash.content_hash != sync_record.local_hash
         {
-            println!("{} - update (server)", &path_str);
+            println!("{} - update (server)", &rel_path);
             continue;
         }
-        println!("{} - no update", &path_str);
+        println!("{} - no update", &rel_path);
     }
 
-    for server_file in server_files {
-        if files.iter().any(|f| {
-            let path_str = f.strip_prefix(sync_root).ok().and_then(|f| f.to_str());
-            path_str == Some(&server_file.path)
+    for server_file in file_metas {
+        if local_files.iter().any(|f| {
+            let rel_path = f.strip_prefix(sync_root).ok().and_then(|f| f.to_str());
+            rel_path == Some(&server_file.path)
         }) {
             continue;
         }
@@ -223,6 +303,8 @@ pub async fn status(
 mod tests {
     use std::cell::RefCell;
 
+    use chrono::Utc;
+    use cloudsync_common::Upload;
     use tempfile::TempDir;
 
     use crate::db::open_db;
@@ -235,6 +317,10 @@ mod tests {
         create_count: RefCell<u64>,
         get_count: RefCell<u64>,
         delete_count: RefCell<u64>,
+        init_upload_count: RefCell<u64>,
+        send_chunk_count: RefCell<u64>,
+        get_upload_count: RefCell<u64>,
+        finalize_upload_count: RefCell<u64>,
         fail_path: RefCell<Option<String>>,
     }
 
@@ -246,6 +332,10 @@ mod tests {
                 create_count: RefCell::new(0),
                 get_count: RefCell::new(0),
                 delete_count: RefCell::new(0),
+                init_upload_count: RefCell::new(0),
+                send_chunk_count: RefCell::new(0),
+                get_upload_count: RefCell::new(0),
+                finalize_upload_count: RefCell::new(0),
                 fail_path: RefCell::new(None),
             }
         }
@@ -297,6 +387,60 @@ mod tests {
             *self.delete_count.borrow_mut() += 1;
             Ok(DeleteFileResponse {})
         }
+
+        async fn init_upload(
+            &self,
+            _request: InitUploadRequest,
+        ) -> anyhow::Result<InitUploadResponse> {
+            *self.init_upload_count.borrow_mut() += 1;
+            Ok(InitUploadResponse {
+                upload_id: "".to_string(),
+            })
+        }
+
+        async fn send_chunk(
+            &self,
+            _upload_id: &str,
+            _chunk_index: u32,
+            _content: Vec<u8>,
+        ) -> anyhow::Result<()> {
+            *self.send_chunk_count.borrow_mut() += 1;
+            Ok(())
+        }
+
+        async fn get_upload(&self, _upload_id: &str) -> anyhow::Result<GetUploadResponse> {
+            *self.get_upload_count.borrow_mut() += 1;
+            Ok(GetUploadResponse {
+                upload: Upload {
+                    path: "".to_string(),
+                    total_size: 10,
+                    upload_id: "".to_string(),
+                    total_hash: "".to_string(),
+                    chunk_count: 1,
+                    chunks_received: Vec::new(),
+                    created_at: Utc::now(),
+                    modified_at: Utc::now(),
+                },
+            })
+        }
+
+        async fn finalize_upload(
+            &self,
+            _upload_id: &str,
+        ) -> anyhow::Result<FinalizeUploadResponse> {
+            *self.finalize_upload_count.borrow_mut() += 1;
+            Ok(FinalizeUploadResponse {
+                file: FileMeta {
+                    path: "".to_string(),
+                    size: 0,
+                    content_hash: "".to_string(),
+                    version: 1,
+                    is_deleted: false,
+                    created_at: Utc::now(),
+                    modified_at: Utc::now(),
+                },
+            })
+        }
     }
 
     fn setup() -> (Database, MockClient, TempDir) {
@@ -321,6 +465,24 @@ mod tests {
         let record = db::get(&db, "file0").unwrap();
         assert!(record.is_some());
         assert_eq!(*mock_client.create_count.borrow(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_push_single_file_chunked() {
+        let (db, mock_client, temp_dir) = setup();
+        let file = temp_dir.path().join("file0");
+        let bytes = vec![0u8; 10 * 1024 * 1024];
+        std::fs::write(&file, bytes).unwrap();
+
+        push_single_file_chunked(&db, &mock_client, temp_dir.path(), &file)
+            .await
+            .unwrap();
+
+        let record = db::get(&db, "file0").unwrap();
+        assert!(record.is_some());
+        assert_eq!(*mock_client.init_upload_count.borrow(), 1);
+        assert_eq!(*mock_client.send_chunk_count.borrow(), 3);
+        assert_eq!(*mock_client.finalize_upload_count.borrow(), 1);
     }
 
     #[tokio::test]

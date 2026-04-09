@@ -16,6 +16,12 @@ pub fn write(data_dir: &str, content: &[u8]) -> anyhow::Result<String> {
     Ok(content_hash)
 }
 
+pub fn get_storage_path(data_dir: &str, total_hash: &str) -> std::path::PathBuf {
+    std::path::Path::new(data_dir)
+        .join(&total_hash[0..2])
+        .join(total_hash)
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

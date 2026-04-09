@@ -1,19 +1,25 @@
 use std::sync::Arc;
 
 use axum::{
-    Json, Router, debug_handler,
-    extract::{DefaultBodyLimit, Multipart, Path, Request, State},
+    Json, Router,
+    body::{self},
+    debug_handler,
+    extract::{self, DefaultBodyLimit, Multipart, Path, Request, State},
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use tower_http::trace::TraceLayer;
 
 use cloudsync_common::{
-    CreateFileResponse, DeleteFileResponse, GetHealthResponse, ListFilesResponse,
+    CreateFileResponse, DeleteFileResponse, FinalizeUploadResponse, GetHealthResponse,
+    GetUploadResponse, InitUploadResponse, ListFilesResponse, ReplaceChunkResponse, hash_file,
+    upload::InitUploadRequest,
 };
 use redb::Database;
+
+use crate::{config::ServerConfig, db_upload};
 
 use super::db;
 use super::storage;
@@ -22,21 +28,24 @@ use super::storage;
 pub struct AppState {
     pub db: Arc<Database>,
     pub storage_dir: String,
+    pub staging_dir: String,
     pub token: String,
 }
 
-struct AppError(anyhow::Error);
+struct AppError(anyhow::Error, StatusCode);
+
+impl AppError {}
 
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
         tracing::error!("{}", self.0);
-        (StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()).into_response()
+        (self.1, self.0.to_string()).into_response()
     }
 }
 
 impl<E: Into<anyhow::Error>> From<E> for AppError {
     fn from(value: E) -> Self {
-        AppError(value.into())
+        AppError(value.into(), StatusCode::INTERNAL_SERVER_ERROR)
     }
 }
 
@@ -93,7 +102,10 @@ async fn get_file(
     let file_meta = db::get(&db, &path)?;
     let Some(file_meta) = file_meta else {
         tracing::warn!("metadata not found: {}", path);
-        return Err(AppError(anyhow::anyhow!("not found")));
+        return Err(AppError(
+            anyhow::anyhow!("not found"),
+            StatusCode::NOT_FOUND,
+        ));
     };
     tracing::debug!(
         "metadata retrieved: {} (version: {})",
@@ -103,6 +115,105 @@ async fn get_file(
     let content_hash = file_meta.content_hash;
     let content = storage::read(&state.storage_dir, &content_hash)?;
     Ok(content)
+}
+
+async fn create_upload(
+    State(state): State<AppState>,
+    extract::Json(body): extract::Json<InitUploadRequest>,
+) -> Result<Json<InitUploadResponse>, AppError> {
+    let upload = db_upload::create(&state.db, body)?;
+    let staging_dir = std::path::Path::new(&state.staging_dir).join(&upload.upload_id);
+    std::fs::create_dir_all(staging_dir)?;
+    Ok(Json(InitUploadResponse {
+        upload_id: upload.upload_id,
+    }))
+}
+
+async fn replace_chunk(
+    State(state): State<AppState>,
+    extract::Path((upload_id, index)): Path<(String, u32)>,
+    body: body::Bytes,
+) -> Result<Json<ReplaceChunkResponse>, AppError> {
+    let upload = db_upload::get(&state.db, &upload_id)?;
+    let Some(upload) = upload else {
+        return Err(AppError(
+            anyhow::anyhow!("upload not found"),
+            StatusCode::NOT_FOUND,
+        ));
+    };
+    if index >= upload.chunk_count as u32 {
+        return Err(AppError(
+            anyhow::anyhow!("index larger than upload chunk_count"),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let staging_dir = std::path::Path::new(&state.staging_dir).join(&upload_id);
+    let chunk_path = staging_dir.join(index.to_string());
+    std::fs::write(chunk_path, body)?;
+    db_upload::add_chunk(&state.db, upload_id.as_str(), index)?;
+    Ok(Json(ReplaceChunkResponse { chunk_index: index }))
+}
+
+async fn get_upload(
+    State(state): State<AppState>,
+    extract::Path(upload_id): Path<String>,
+) -> Result<Json<GetUploadResponse>, AppError> {
+    let upload = db_upload::get(&state.db, &upload_id)?;
+    let Some(upload) = upload else {
+        return Err(AppError(
+            anyhow::anyhow!("not found"),
+            StatusCode::NOT_FOUND,
+        ));
+    };
+    Ok(Json(GetUploadResponse { upload }))
+}
+
+async fn finalize_upload(
+    State(state): State<AppState>,
+    extract::Path(upload_id): Path<String>,
+) -> Result<Json<FinalizeUploadResponse>, AppError> {
+    let upload = db_upload::get(&state.db, &upload_id)?;
+    let Some(upload) = upload else {
+        return Err(AppError(
+            anyhow::anyhow!("not found"),
+            StatusCode::NOT_FOUND,
+        ));
+    };
+    if upload.chunks_received.len() != upload.chunk_count as usize {
+        return Err(AppError(
+            anyhow::anyhow!("bad request"),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let staging_dir = std::path::Path::new(&state.staging_dir).join(&upload_id);
+    let storage_path = storage::get_storage_path(&state.storage_dir, &upload.total_hash);
+    std::fs::create_dir_all(storage_path.parent().unwrap())?;
+    let mut storage_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&storage_path)?;
+    for chunk_index in 0..upload.chunk_count {
+        let chunk_path = staging_dir.join(chunk_index.to_string());
+        let mut chunk_file = std::fs::OpenOptions::new().read(true).open(chunk_path)?;
+        std::io::copy(&mut chunk_file, &mut storage_file)?;
+    }
+
+    let total_hash = hash_file(&storage_path)?;
+    if upload.total_hash != total_hash {
+        return Err(AppError(
+            anyhow::anyhow!("unexpected hash mismatch after writing"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ));
+    }
+    let file = db::put(
+        &state.db,
+        &upload.path,
+        upload.total_size,
+        &upload.total_hash,
+    )?;
+    db_upload::delete(&state.db, &upload_id)?;
+    std::fs::remove_dir_all(staging_dir)?;
+    Ok(Json(FinalizeUploadResponse { file }))
 }
 
 #[debug_handler]
@@ -137,6 +248,16 @@ pub fn create_app(state: AppState) -> Router {
         .route("/api/v1/files", post(post_file))
         .route("/api/v1/files/{*path}", get(get_file))
         .route("/api/v1/files/{*path}", delete(delete_file))
+        .route("/api/v1/uploads", post(create_upload))
+        .route("/api/v1/uploads/{upload_id}", get(get_upload))
+        .route(
+            "/api/v1/uploads/{upload_id}/chunks/{index}",
+            put(replace_chunk),
+        )
+        .route(
+            "/api/v1/uploads/{upload_id}/finalize",
+            post(finalize_upload),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_layer,
@@ -149,16 +270,14 @@ pub fn create_app(state: AppState) -> Router {
         .with_state(state)
 }
 
-pub fn bootstrap_app(storage_dir: String, token: String, dbname: String) -> anyhow::Result<Router> {
-    let db = Database::create(dbname)?;
-    let tx = db.begin_write()?;
-    tx.open_table(db::TABLE)?;
-    tx.commit()?;
+pub fn bootstrap_app(config: ServerConfig) -> anyhow::Result<Router> {
+    let db = db::open_db(&config.dbname)?;
     let db = Arc::new(db);
     let state = AppState {
         db,
-        storage_dir,
-        token,
+        storage_dir: config.storage_dir,
+        staging_dir: config.staging_dir,
+        token: config.token,
     };
     let app = create_app(state);
     Ok(app)
