@@ -49,6 +49,7 @@ jobs:
               -v /mnt/volume-cloudsync/cloudsync:/data \
               -e CLOUDSYNC_TOKEN=$CLOUDSYNC_TOKEN \
               -e CLOUDSYNC_STORAGE_DIR=/data/files \
+              -e CLOUDSYNC_STAGING_DIR=/data/staging \
               -e CLOUDSYNC_DBNAME=/data/data.redb \
               -e CLOUDSYNC_HOST=0.0.0.0 \
               -e RUST_LOG=cloudsync_server=info \
