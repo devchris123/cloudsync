@@ -261,7 +261,8 @@ pub fn create_app(state: AppState) -> Router {
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_layer,
-        ));
+        ))
+        .layer(DefaultBodyLimit::max(5 * 1024 * 1024)); // 4MB + overhead
     Router::<AppState>::new()
         .route("/api/v1/health", get(get_health))
         .merge(auth_router)
