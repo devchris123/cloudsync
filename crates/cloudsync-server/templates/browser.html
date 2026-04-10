@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+
+{% block title %}Browse — CloudSync{% endblock %}
+
+{% block body %}
+<nav>
+    <span class="brand">CloudSync</span>
+    <form method="post" action="/logout">
+        <button type="submit">Sign out</button>
+    </form>
+</nav>
+<main>
+    <div class="breadcrumbs">
+        <a href="/browse">/</a>
+        {% for crumb in breadcrumbs %}
+        <span class="sep">/</span>
+        <a href="/browse?prefix={{ crumb.prefix }}">{{ crumb.name }}</a>
+        {% endfor %}
+    </div>
+
+    {% if directories.is_empty() && files.is_empty() %}
+    <div class="empty">
+        <p>No files here.</p>
+    </div>
+    {% else %}
+    <table class="file-table">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Size</th>
+                <th>Modified</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for dir in directories %}
+            <tr>
+                <td><span class="icon">&#128193;</span><a href="/browse?prefix={{ prefix }}{{ dir }}">{{ dir }}</a></td>
+                <td class="size">—</td>
+                <td class="date">—</td>
+            </tr>
+            {% endfor %}
+            {% for file in files %}
+            <tr>
+                <td><a href="/api/v1/files/{{ file.path }}">{{ file.name }}</a></td>
+                <td class="size">{{ file.display_size }}</td>
+                <td class="date">{{ file.display_date }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</main>
+{% endblock %}

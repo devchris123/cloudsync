@@ -234,20 +234,30 @@ async fn auth_layer(
     next: Next,
 ) -> Result<Response, StatusCode> {
     let headers = request.headers();
-    let auth_header = headers.get("Authorization");
-    let Some(auth_header) = auth_header else {
-        tracing::warn!("access denied: no authorization header");
-        return Err(StatusCode::FORBIDDEN);
-    };
-    if auth_header.to_str().unwrap() != format!("Bearer {}", state.token) {
-        tracing::warn!("access denied: token invalid");
-        return Err(StatusCode::FORBIDDEN);
+
+    // Check Bearer token header (CLI / API clients)
+    if let Some(auth_header) = headers.get("Authorization")
+        && auth_header.to_str().unwrap() == format!("Bearer {}", state.token)
+    {
+        tracing::trace!("access granted via bearer token");
+        return Ok(next.run(request).await);
     }
-    tracing::trace!("access granted");
-    Ok(next.run(request).await)
+
+    // Check session cookie (browser)
+    if let Some(cookie_header) = headers.get(axum::http::header::COOKIE)
+        && let Ok(cookie_str) = cookie_header.to_str()
+        && crate::ui::verify_session_cookie(cookie_str, &state.token)
+    {
+        tracing::trace!("access granted via session cookie");
+        return Ok(next.run(request).await);
+    }
+
+    tracing::warn!("access denied: no valid authorization");
+    Err(StatusCode::FORBIDDEN)
 }
 
 pub fn create_app(state: AppState) -> Router {
+    // API routes with Bearer token / cookie auth
     let auth_router = Router::<AppState>::new()
         .route("/api/v1/files", get(list_files))
         .route("/api/v1/files", post(post_file))
@@ -268,9 +278,22 @@ pub fn create_app(state: AppState) -> Router {
             auth_layer,
         ))
         .layer(DefaultBodyLimit::max(5 * 1024 * 1024)); // 4MB + overhead
+
+    // Web UI routes (auth handled per-handler via cookie check)
+    let ui_router = Router::<AppState>::new()
+        .route("/", get(crate::ui::index))
+        .route(
+            "/login",
+            get(crate::ui::login_page).post(crate::ui::login_submit),
+        )
+        .route("/logout", post(crate::ui::logout))
+        .route("/browse", get(crate::ui::browse))
+        .route("/static/{*path}", get(crate::ui::static_file));
+
     Router::<AppState>::new()
         .route("/api/v1/health", get(get_health))
         .merge(auth_router)
+        .merge(ui_router)
         .layer(TraceLayer::new_for_http())
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50MB
         .with_state(state)
