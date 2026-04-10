@@ -18,6 +18,7 @@ tracing-subscriber = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 nanoid = "0.4"
+# Web UI
 askama = "0.15"
 rust-embed = "8"
 hmac = "0.12"

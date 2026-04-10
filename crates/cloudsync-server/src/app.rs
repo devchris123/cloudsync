@@ -228,32 +228,46 @@ async fn get_health() -> Result<Json<GetHealthResponse>, AppError> {
     }))
 }
 
-async fn auth_layer(
-    State(state): State<AppState>,
-    request: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
-    let headers = request.headers();
+#[derive(Clone)]
+struct AuthGranted;
 
-    // Check Bearer token header (CLI / API clients)
-    if let Some(auth_header) = headers.get("Authorization")
+async fn bearer_auth_layer(
+    State(state): State<AppState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    if let Some(auth_header) = request.headers().get("Authorization")
         && auth_header.to_str().unwrap() == format!("Bearer {}", state.token)
     {
-        tracing::trace!("access granted via bearer token");
-        return Ok(next.run(request).await);
+        tracing::trace!("bearer token valid");
+        request.extensions_mut().insert(AuthGranted);
     }
+    next.run(request).await
+}
 
-    // Check session cookie (browser)
-    if let Some(cookie_header) = headers.get(axum::http::header::COOKIE)
+async fn cookie_auth_layer(
+    State(state): State<AppState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    if let Some(cookie_header) = request.headers().get(axum::http::header::COOKIE)
         && let Ok(cookie_str) = cookie_header.to_str()
         && crate::ui::verify_session_cookie(cookie_str, &state.token)
     {
-        tracing::trace!("access granted via session cookie");
-        return Ok(next.run(request).await);
+        tracing::trace!("session cookie valid");
+        request.extensions_mut().insert(AuthGranted);
     }
+    next.run(request).await
+}
 
-    tracing::warn!("access denied: no valid authorization");
-    Err(StatusCode::FORBIDDEN)
+async fn require_auth_layer(request: Request, next: Next) -> Result<Response, StatusCode> {
+    if request.extensions().get::<AuthGranted>().is_some() {
+        tracing::trace!("access granted");
+        Ok(next.run(request).await)
+    } else {
+        tracing::warn!("access denied: no valid authorization");
+        Err(StatusCode::FORBIDDEN)
+    }
 }
 
 pub fn create_app(state: AppState) -> Router {
@@ -273,9 +287,14 @@ pub fn create_app(state: AppState) -> Router {
             "/api/v1/uploads/{upload_id}/finalize",
             post(finalize_upload),
         )
+        .route_layer(axum::middleware::from_fn(require_auth_layer))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            auth_layer,
+            cookie_auth_layer,
+        ))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            bearer_auth_layer,
         ))
         .layer(DefaultBodyLimit::max(5 * 1024 * 1024)); // 4MB + overhead
 
