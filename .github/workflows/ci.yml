@@ -54,3 +54,9 @@ jobs:
           else
             cargo build --release --target ${{ matrix.target }} -p cloudsync-client
           fi
+
+  ci-pass:
+    needs: [lint-and-test, build-client]
+    runs-on: ubuntu-24.04
+    steps:
+      - run: "true"
