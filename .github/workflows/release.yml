@@ -6,15 +6,77 @@ on:
       - "v*"
 
 jobs:
-  release:
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-      packages: write
+  build-client:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            use-cross: false
+            artifact-name: cloudsync-linux-x86_64
+            build-server: true
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            use-cross: true
+            artifact-name: cloudsync-linux-aarch64
+          - target: x86_64-apple-darwin
+            runner: macos-14
+            use-cross: false
+            artifact-name: cloudsync-darwin-x86_64
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            use-cross: false
+            artifact-name: cloudsync-darwin-aarch64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - run: cargo build --release
+        with:
+          target: ${{ matrix.target }}
+      - name: Install cross
+        if: matrix.use-cross
+        run: cargo install cross --locked
+      - name: Build client
+        run: |
+          if [ "${{ matrix.use-cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} -p cloudsync-client
+          else
+            cargo build --release --target ${{ matrix.target }} -p cloudsync-client
+          fi
+      - name: Build server
+        if: matrix.build-server
+        run: cargo build --release --target ${{ matrix.target }} -p cloudsync-server
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: target/${{ matrix.target }}/release/cloudsync-client
+      - name: Upload server artifact
+        if: matrix.build-server
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudsync-server-linux-x86_64
+          path: target/${{ matrix.target }}/release/cloudsync-server
+
+  release:
+    needs: build-client
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+      - name: Rename binaries
+        run: |
+          for dir in artifacts/cloudsync-*; do
+            name=$(basename "$dir")
+            binary=$(ls "$dir")
+            mv "$dir/$binary" "artifacts/$name"
+            rmdir "$dir"
+          done
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -22,8 +84,16 @@ jobs:
           gh release create ${{ github.ref_name }} \
             --title "${{ github.ref_name }}" \
             --generate-notes \
-            target/release/cloudsync-client \
-            target/release/cloudsync-server
+            artifacts/cloudsync-* \
+            install.sh
+
+  deploy:
+    needs: release
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
       - name: Login to GHCR
         run: echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
       - name: Build and push Docker image

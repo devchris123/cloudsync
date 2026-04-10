@@ -32,6 +32,14 @@ docker compose up -d
 
 ### Client
 
+Install the CLI:
+
+```sh
+curl -fsSL https://github.com/devchris123/cloudsync/releases/latest/download/install.sh | sh
+```
+
+Or download a binary directly from the [latest release](https://github.com/devchris123/cloudsync/releases/latest).
+
 ```sh
 # Initialize a sync directory
 cloudsync init --server-url http://your-server:3050 --token your-secret-token

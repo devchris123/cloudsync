@@ -13,16 +13,44 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-test:
-    runs-on: [ubuntu-24.04]
+  lint-and-test:
+    runs-on: ubuntu-24.04
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-      - name: Setup rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Rustfmt Check
-        uses: actions-rust-lang/rustfmt@v1
-      - name: Clippy Check
-        run: cargo clippy -- --deny warnings
-      - name: Run tests
-        run: cargo test
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/rustfmt@v1
+      - run: cargo clippy -- --deny warnings
+      - run: cargo test
+
+  build-client:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            use-cross: false
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            use-cross: true
+          - target: x86_64-apple-darwin
+            runner: macos-14
+            use-cross: false
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            use-cross: false
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+      - name: Install cross
+        if: matrix.use-cross
+        run: cargo install cross --locked
+      - name: Build client
+        run: |
+          if [ "${{ matrix.use-cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} -p cloudsync-client
+          else
+            cargo build --release --target ${{ matrix.target }} -p cloudsync-client
+          fi
