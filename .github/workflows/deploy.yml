@@ -1,0 +1,33 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to deploy (e.g., v1.0.0)"
+        required: true
+        default: "latest"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Deploy to server
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.CLOUDSYNC_HETZNER_PRIVATE_KEY }}
+          CLOUDSYNC_TOKEN: ${{ secrets.CLOUDSYNC_TOKEN }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key docker-compose.yml root@46.224.102.7:~/docker-compose.yml
+          scp -r -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key caddy root@46.224.102.7:~/caddy
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key root@46.224.102.7 << EOF
+            CLOUDSYNC_DOCKER_TAG=${{ inputs.version }} \
+            CLOUDSYNC_MOUNT_DIR=/mnt/volume-cloudsync/cloudsync \
+            CLOUDSYNC_TOKEN=$CLOUDSYNC_TOKEN \
+            CLOUDSYNC_CADDY_MOUNT_DIR=/mnt/volume-cloudsync/caddy \
+            CLOUDSYNC_CADDYFILE_DIR=./caddy \
+            docker compose -f ~/docker-compose.yml up -d
+          EOF

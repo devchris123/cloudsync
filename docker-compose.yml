@@ -1,8 +1,6 @@
 services:
   cloudsync:
     image: ghcr.io/devchris123/cloudsync-server:${CLOUDSYNC_DOCKER_TAG:-latest}
-    ports:
-      - "3050:3050"
     volumes:
       - ${CLOUDSYNC_MOUNT_DIR}:/data
     environment:
@@ -12,4 +10,15 @@ services:
       - CLOUDSYNC_DBNAME=/data/data.redb
       - CLOUDSYNC_HOST=0.0.0.0
       - RUST_LOG=cloudsync_server=info
+    restart: unless-stopped
+
+  reverse-proxy:
+    image: caddy:2.11.2-alpine@sha256:fce4f15aad23222c0ac78a1220adf63bae7b94355d5ea28eee53910624acedfa
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ${CLOUDSYNC_CADDY_MOUNT_DIR}/data:/data
+      - ${CLOUDSYNC_CADDY_MOUNT_DIR}/config:/config
+      - ${CLOUDSYNC_CADDYFILE_DIR}:/etc/caddy
     restart: unless-stopped
