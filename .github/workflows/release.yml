@@ -87,7 +87,7 @@ jobs:
             artifacts/cloudsync-* \
             install.sh
 
-  deploy:
+  release-docker:
     runs-on: ubuntu-24.04
     permissions:
       packages: write
@@ -101,18 +101,3 @@ jobs:
                        -t ghcr.io/devchris123/cloudsync-server:latest .
           docker push ghcr.io/devchris123/cloudsync-server:${{ github.ref_name }}
           docker push ghcr.io/devchris123/cloudsync-server:latest
-      - name: Deploy to server
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.CLOUDSYNC_HETZNER_PRIVATE_KEY }}
-          CLOUDSYNC_TOKEN: ${{ secrets.CLOUDSYNC_TOKEN }}
-        run: |
-          mkdir -p ~/.ssh
-          echo "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          scp -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key docker-compose.yml root@46.224.102.7:~/docker-compose.yml
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key root@46.224.102.7 << EOF
-            CLOUDSYNC_DOCKER_TAG=${{ github.ref_name }} \
-            CLOUDSYNC_MOUNT_DIR=/mnt/volume-cloudsync/cloudsync \
-            CLOUDSYNC_TOKEN=$CLOUDSYNC_TOKEN \
-            docker compose -f ~/docker-compose.yml up -d
-          EOF

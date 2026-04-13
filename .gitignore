@@ -3,3 +3,5 @@ cloudsync
 data.redb
 .cloudsync
 .claude/worktrees/
+.env
+.local
