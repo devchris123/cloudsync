@@ -73,9 +73,10 @@ jobs:
         run: |
           for dir in artifacts/cloudsync-*; do
             name=$(basename "$dir")
-            binary=$(ls "$dir")
-            mv "$dir/$binary" "artifacts/$name"
-            rmdir "$dir"
+            binary=$(find "$dir" -type f | head -1)
+            mv "$binary" "artifacts/${name}.tmp"
+            rm -r "$dir"
+            mv "artifacts/${name}.tmp" "artifacts/${name}"
           done
       - name: Create release
         env:
