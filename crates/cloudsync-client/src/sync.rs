@@ -37,6 +37,7 @@ pub struct SyncRecord {
     pub path: String,
     pub local_hash: String,
     pub server_version: u64,
+    pub upload_id: Option<String>,
 }
 
 pub async fn push(
@@ -106,8 +107,9 @@ async fn push_single_file(
         path: rel_path.clone(),
         local_hash: hash,
         server_version: resp.file.version,
+        upload_id: None,
     };
-    db::put(db, sync_record)?;
+    db::put(db, &sync_record)?;
     println!("pushed: {}", &rel_path);
     Ok(())
 }
@@ -126,8 +128,8 @@ pub async fn push_single_file_chunked(
         .to_str()
         .unwrap()
         .to_string();
-    let sync_record = db::get(db, &rel_path)?;
-    if let Some(sr) = sync_record
+    let mut sync_record = db::get(db, &rel_path)?;
+    if let Some(sr) = &sync_record
         && sr.local_hash == hash
     {
         return Ok(());
@@ -140,6 +142,12 @@ pub async fn push_single_file_chunked(
             chunk_count,
         })
         .await?;
+
+    if let Some(sr) = &mut sync_record {
+        sr.upload_id = Some(upload.upload_id.to_string());
+        db::put(db, &sr)?;
+    }
+
     let mut file = std::fs::File::open(local_path)?;
     for i in 0..chunk_count {
         let mut buf = Vec::new();
@@ -153,8 +161,9 @@ pub async fn push_single_file_chunked(
         path: rel_path.clone(),
         local_hash: hash,
         server_version: resp.file.version,
+        upload_id: None,
     };
-    db::put(db, sync_record)?;
+    db::put(db, &sync_record)?;
     println!("pushed: {}", &rel_path);
     Ok(())
 }
@@ -235,8 +244,9 @@ async fn pull_single_file(
         path: file_meta.path.clone(),
         local_hash: hash_file(local_path)?,
         server_version: file_meta.version,
+        upload_id: None,
     };
-    db::put(db, sync_record)?;
+    db::put(db, &sync_record)?;
     println!("pulled: {}", &file_meta.path);
 
     Ok(())
@@ -498,8 +508,9 @@ mod tests {
             path: "file0".to_string(),
             local_hash: hash_bytes(bytes),
             server_version: 0,
+            upload_id: None,
         };
-        db::put(&db, sync_record).unwrap();
+        db::put(&db, &sync_record).unwrap();
 
         push_single_file(&db, &mock_client, temp_dir.path(), &file)
             .await
@@ -530,8 +541,9 @@ mod tests {
             path: "file0".to_string(),
             local_hash: hash_bytes(bytes),
             server_version: 0,
+            upload_id: None,
         };
-        db::put(&db, sync_record).unwrap();
+        db::put(&db, &sync_record).unwrap();
 
         push(&db, &mock_client, temp_dir.path()).await.unwrap();
 
@@ -551,8 +563,9 @@ mod tests {
             path: "file0".to_string(),
             local_hash: hash_bytes(bytes),
             server_version: 0,
+            upload_id: None,
         };
-        db::put(&db, sync_record).unwrap();
+        db::put(&db, &sync_record).unwrap();
 
         push(&db, &mock_client, temp_dir.path()).await.unwrap();
 
@@ -582,8 +595,9 @@ mod tests {
             path: "file0".to_string(),
             local_hash: hash_bytes(bytes),
             server_version: 2,
+            upload_id: None,
         };
-        db::put(&db, sync_record).unwrap();
+        db::put(&db, &sync_record).unwrap();
 
         pull_single_file(&db, &mock_client, temp_dir.path(), &file_meta)
             .await
@@ -605,8 +619,9 @@ mod tests {
             path: "file0".to_string(),
             local_hash: hash_bytes(bytes),
             server_version: 1,
+            upload_id: None,
         };
-        db::put(&db, sync_record).unwrap();
+        db::put(&db, &sync_record).unwrap();
 
         pull_single_file(&db, &mock_client, temp_dir.path(), &file_meta)
             .await
@@ -630,8 +645,9 @@ mod tests {
             path: "subdir/file0".to_string(),
             local_hash: "somethingelse".to_string(),
             server_version: 1,
+            upload_id: None,
         };
-        db::put(&db, sync_record).unwrap();
+        db::put(&db, &sync_record).unwrap();
 
         pull_single_file(&db, &mock_client, temp_dir.path(), &file_meta)
             .await
