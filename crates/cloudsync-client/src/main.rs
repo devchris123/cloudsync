@@ -1,11 +1,12 @@
 use std::path::PathBuf;
 
 use clap::Parser;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use redb::Database;
 
 use crate::config::ClientConfig;
 
-use cloudsync_client::{cli, client, config, db, sync};
+use cloudsync_client::{cli, client, config, db, sync, ui};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -24,7 +25,14 @@ async fn main() -> anyhow::Result<()> {
         }
         cli::Command::Push => {
             let (db, sync_client, sync_root) = setup().await?;
-            sync::push(&db, &sync_client, &sync_root).await?;
+            let mp = MultiProgress::new();
+            let on_file_start = |path: &str, count: u64| -> Box<dyn Fn()> {
+                let pb = mp.add(ProgressBar::new(count));
+                pb.set_style(ProgressStyle::with_template("{msg} [{bar:20}] {pos}/{len}").unwrap());
+                pb.set_message(path.to_string());
+                Box::new(move || pb.inc(1))
+            };
+            sync::push(&db, &sync_client, &sync_root, &on_file_start).await?;
         }
         cli::Command::Pull => {
             let (db, sync_client, sync_root) = setup().await?;

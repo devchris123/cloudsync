@@ -4,3 +4,4 @@ pub mod config;
 pub mod db;
 pub mod scanner;
 pub mod sync;
+pub mod ui;

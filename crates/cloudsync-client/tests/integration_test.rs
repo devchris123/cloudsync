@@ -57,7 +57,7 @@ async fn test_push_and_pull() {
     std::fs::write(&file3, &bytes3).unwrap();
 
     // push
-    sync::push(&db, &sync_client, client_root_dir.path())
+    sync::push(&db, &sync_client, client_root_dir.path(), &noop_progress())
         .await
         .unwrap();
 
@@ -125,7 +125,7 @@ async fn test_pull_conflict() {
     std::fs::write(&file1, bytes1).unwrap();
 
     // push
-    sync::push(&db, &sync_client, client_root_dir.path())
+    sync::push(&db, &sync_client, client_root_dir.path(), &noop_progress())
         .await
         .unwrap();
 
@@ -144,9 +144,14 @@ async fn test_pull_conflict() {
         "hello world other client changed",
     )
     .unwrap();
-    sync::push(&other_db, &sync_client, other_client_root_dir.path())
-        .await
-        .unwrap();
+    sync::push(
+        &other_db,
+        &sync_client,
+        other_client_root_dir.path(),
+        &noop_progress(),
+    )
+    .await
+    .unwrap();
 
     // Pull with first client again
     sync::pull(&db, &sync_client, client_root_dir.path())
@@ -166,4 +171,8 @@ async fn test_pull_conflict() {
             .contains("file0.conflict")
     });
     assert!(conflict_exist);
+}
+
+fn noop_progress() -> impl Fn(&str, u64) -> Box<dyn Fn()> {
+    |_: &str, _: u64| -> Box<dyn Fn()> { Box::new(|| {}) }
 }
