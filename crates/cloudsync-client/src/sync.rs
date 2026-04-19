@@ -37,12 +37,14 @@ pub struct SyncRecord {
     pub path: String,
     pub local_hash: String,
     pub server_version: u64,
+    pub upload_id: Option<String>,
 }
 
 pub async fn push(
     db: &Database,
     sync_client: &impl SyncApi,
     sync_root: &Path,
+    on_file_start: &impl Fn(&str, u64, u64) -> Box<dyn Fn()>,
 ) -> anyhow::Result<()> {
     let ignored = scanner::get_ignored(sync_root);
     let local_paths = scanner::scan_dir(sync_root, &ignored)?;
@@ -59,7 +61,7 @@ pub async fn push(
                 continue;
             }
         } else if let Err(e) =
-            push_single_file_chunked(db, sync_client, sync_root, local_path).await
+            push_single_file_chunked(db, sync_client, sync_root, local_path, on_file_start).await
         {
             println!(
                 "error pushing chunked {}: {}",
@@ -106,8 +108,9 @@ async fn push_single_file(
         path: rel_path.clone(),
         local_hash: hash,
         server_version: resp.file.version,
+        upload_id: None,
     };
-    db::put(db, sync_record)?;
+    db::put(db, &sync_record)?;
     println!("pushed: {}", &rel_path);
     Ok(())
 }
@@ -117,6 +120,7 @@ pub async fn push_single_file_chunked(
     sync_client: &impl SyncApi,
     sync_root: &Path,
     local_path: &Path,
+    on_file_start: &impl Fn(&str, u64, u64) -> Box<dyn Fn()>,
 ) -> anyhow::Result<()> {
     let total_size = local_path.metadata()?.len();
     let chunk_count = total_size.div_ceil(CHUNK_SIZE);
@@ -126,35 +130,119 @@ pub async fn push_single_file_chunked(
         .to_str()
         .unwrap()
         .to_string();
-    let sync_record = db::get(db, &rel_path)?;
-    if let Some(sr) = sync_record
+    let mut sync_record = db::get(db, &rel_path)?;
+    if let Some(sr) = &sync_record
         && sr.local_hash == hash
     {
         return Ok(());
     }
-    let upload = sync_client
-        .init_upload(InitUploadRequest {
+    let mut upload_id: Option<String> = None;
+    let mut chunks_received: Vec<u32> = vec![];
+    let mut chunk_count = chunk_count;
+
+    if let Some(sr) = &mut sync_record
+        && sr.upload_id.is_some()
+    {
+        let result = sync_client.get_upload(&sr.upload_id.clone().unwrap()).await;
+        if let Ok(res) = result {
+            upload_id = Some(res.upload.upload_id);
+            chunks_received = res.upload.chunks_received;
+            chunk_count = res.upload.chunk_count;
+        }
+    }
+    if upload_id.is_none() {
+        let upload = sync_client
+            .init_upload(InitUploadRequest {
+                path: rel_path.clone(),
+                total_size,
+                total_hash: hash.clone(),
+                chunk_count,
+            })
+            .await?;
+        upload_id = Some(upload.upload_id);
+    }
+
+    resume_upload(
+        &upload_id.unwrap(),
+        db,
+        sync_client,
+        sync_record.as_mut(),
+        local_path,
+        chunks_received,
+        chunk_count,
+        rel_path,
+        hash,
+        on_file_start,
+    )
+    .await
+}
+
+pub async fn resume_upload(
+    upload_id: &str,
+    db: &Database,
+    sync_client: &impl SyncApi,
+    mut sync_record: Option<&mut SyncRecord>,
+    local_path: &Path,
+    chunks_received: Vec<u32>,
+    chunk_count: u64,
+    rel_path: String,
+    hash: String,
+    on_file_start: impl Fn(&str, u64, u64) -> Box<dyn Fn()>,
+) -> anyhow::Result<()> {
+    if let Some(sr) = &mut sync_record {
+        sr.upload_id = Some(upload_id.to_string());
+        db::put(db, &sr)?;
+    } else {
+        let sr = SyncRecord {
             path: rel_path.clone(),
-            total_size,
-            total_hash: hash.clone(),
-            chunk_count,
-        })
-        .await?;
+            local_hash: hash.clone(),
+            server_version: 0,
+            upload_id: Some(upload_id.to_string()),
+        };
+        db::put(db, &sr)?;
+    }
+
     let mut file = std::fs::File::open(local_path)?;
-    for i in 0..chunk_count {
+    let batch_size = std::env::var("CLOUDSYNC_BATCH_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+    let mut join_set = vec![];
+
+    let on_progress = on_file_start(&rel_path, chunk_count, chunks_received.len() as u64);
+    for idx in 0..chunk_count {
         let mut buf = Vec::new();
         (&mut file).take(CHUNK_SIZE).read_to_end(&mut buf)?;
-        sync_client
-            .send_chunk(&upload.upload_id, i as u32, buf)
-            .await?;
+        // Do the skip after reading file, so the file pointer correctly advances for the next read.
+        if chunks_received.contains(&(idx as u32)) {
+            continue;
+        }
+        let fut = sync_client.send_chunk(&upload_id, idx as u32, buf);
+        join_set.push(fut);
+        if join_set.len() == batch_size as usize || idx == chunk_count - 1 {
+            let results = futures::future::join_all(join_set.drain(..)).await;
+            for res in results {
+                res?;
+                on_progress();
+            }
+        }
     }
-    let resp = sync_client.finalize_upload(&upload.upload_id).await?;
+    // Final flush in case we skipped the last chunk before the loop ends
+    if !join_set.is_empty() {
+        let results = futures::future::join_all(join_set.drain(..)).await;
+        for res in results {
+            res?;
+        }
+    }
+
+    let resp = sync_client.finalize_upload(&upload_id).await?;
     let sync_record = SyncRecord {
         path: rel_path.clone(),
         local_hash: hash,
         server_version: resp.file.version,
+        upload_id: None,
     };
-    db::put(db, sync_record)?;
+    db::put(db, &sync_record)?;
     println!("pushed: {}", &rel_path);
     Ok(())
 }
@@ -235,8 +323,9 @@ async fn pull_single_file(
         path: file_meta.path.clone(),
         local_hash: hash_file(local_path)?,
         server_version: file_meta.version,
+        upload_id: None,
     };
-    db::put(db, sync_record)?;
+    db::put(db, &sync_record)?;
     println!("pulled: {}", &file_meta.path);
 
     Ok(())
@@ -322,7 +411,11 @@ mod tests {
         delete_count: RefCell<u64>,
         init_upload_count: RefCell<u64>,
         send_chunk_count: RefCell<u64>,
+        send_chunk_fails: RefCell<bool>,
         get_upload_count: RefCell<u64>,
+        get_upload_chunks_received: RefCell<Vec<u32>>,
+        get_upload_chunk_count: RefCell<u64>,
+        get_upload_fail_id: RefCell<Option<String>>,
         finalize_upload_count: RefCell<u64>,
         fail_path: RefCell<Option<String>>,
     }
@@ -337,7 +430,11 @@ mod tests {
                 delete_count: RefCell::new(0),
                 init_upload_count: RefCell::new(0),
                 send_chunk_count: RefCell::new(0),
+                send_chunk_fails: RefCell::new(false),
                 get_upload_count: RefCell::new(0),
+                get_upload_chunks_received: RefCell::new(vec![]),
+                get_upload_chunk_count: RefCell::new(0),
+                get_upload_fail_id: RefCell::new(None),
                 finalize_upload_count: RefCell::new(0),
                 fail_path: RefCell::new(None),
             }
@@ -349,6 +446,22 @@ mod tests {
 
         fn set_fail_path(&self, path: String) {
             *self.fail_path.borrow_mut() = Some(path);
+        }
+
+        fn set_send_chunk_fails(&self, fails: bool) {
+            *self.send_chunk_fails.borrow_mut() = fails;
+        }
+
+        fn set_upload_chunks_received(&self, chunks: Vec<u32>) {
+            *self.get_upload_chunks_received.borrow_mut() = chunks;
+        }
+
+        fn set_upload_chunk_count(&self, chunk_count: u64) {
+            *self.get_upload_chunk_count.borrow_mut() = chunk_count;
+        }
+
+        fn set_upload_fail_id(&self, upload_id: String) {
+            *self.get_upload_fail_id.borrow_mut() = Some(upload_id);
         }
     }
 
@@ -408,19 +521,25 @@ mod tests {
             _content: Vec<u8>,
         ) -> anyhow::Result<()> {
             *self.send_chunk_count.borrow_mut() += 1;
+            if *self.send_chunk_fails.borrow() {
+                anyhow::bail!("error sending chunks");
+            }
             Ok(())
         }
 
-        async fn get_upload(&self, _upload_id: &str) -> anyhow::Result<GetUploadResponse> {
+        async fn get_upload(&self, upload_id: &str) -> anyhow::Result<GetUploadResponse> {
             *self.get_upload_count.borrow_mut() += 1;
+            if self.get_upload_fail_id.borrow().as_deref() == Some(upload_id) {
+                anyhow::bail!("error");
+            }
             Ok(GetUploadResponse {
                 upload: Upload {
                     path: "".to_string(),
                     total_size: 10,
                     upload_id: "".to_string(),
                     total_hash: "".to_string(),
-                    chunk_count: 1,
-                    chunks_received: Vec::new(),
+                    chunk_count: *self.get_upload_chunk_count.borrow(),
+                    chunks_received: (*self.get_upload_chunks_received.borrow().clone()).to_vec(),
                     created_at: Utc::now(),
                     modified_at: Utc::now(),
                 },
@@ -454,6 +573,10 @@ mod tests {
         return (db, mock_client, temp_dir);
     }
 
+    fn noop_progress() -> impl Fn(&str, u64, u64) -> Box<dyn Fn()> {
+        |_: &str, _: u64, _: u64| -> Box<dyn Fn()> { Box::new(|| {}) }
+    }
+
     #[tokio::test]
     async fn test_push_single_file() {
         let (db, mock_client, temp_dir) = setup();
@@ -477,15 +600,92 @@ mod tests {
         let bytes = vec![0u8; 10 * 1024 * 1024];
         std::fs::write(&file, bytes).unwrap();
 
-        push_single_file_chunked(&db, &mock_client, temp_dir.path(), &file)
+        push_single_file_chunked(&db, &mock_client, temp_dir.path(), &file, &noop_progress())
             .await
             .unwrap();
 
         let record = db::get(&db, "file0").unwrap();
         assert!(record.is_some());
+        assert!(record.unwrap().upload_id.is_none());
         assert_eq!(*mock_client.init_upload_count.borrow(), 1);
         assert_eq!(*mock_client.send_chunk_count.borrow(), 3);
         assert_eq!(*mock_client.finalize_upload_count.borrow(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_push_single_file_chunked_resumes() {
+        let (db, mock_client, temp_dir) = setup();
+        let file = temp_dir.path().join("file0");
+        let bytes = b"hello world";
+        std::fs::write(&file, &bytes).unwrap();
+        let sync_record = SyncRecord {
+            path: "file0".to_string(),
+            local_hash: "something".to_string(),
+            server_version: 0,
+            upload_id: Some("test_upload".to_string()),
+        };
+        db::put(&db, &sync_record).unwrap();
+        mock_client.set_upload_chunks_received(vec![1, 3, 4]);
+        mock_client.set_upload_chunk_count(5);
+
+        push_single_file_chunked(&db, &mock_client, temp_dir.path(), &file, &noop_progress())
+            .await
+            .unwrap();
+
+        let record = db::get(&db, "file0").unwrap();
+        assert!(record.is_some());
+        assert!(record.unwrap().upload_id.is_none());
+        assert_eq!(*mock_client.init_upload_count.borrow(), 0);
+        assert_eq!(*mock_client.send_chunk_count.borrow(), 2);
+        assert_eq!(*mock_client.finalize_upload_count.borrow(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_push_single_file_chunked_expired() {
+        let (db, mock_client, temp_dir) = setup();
+        let file = temp_dir.path().join("file0");
+        let bytes = b"hello world";
+        std::fs::write(&file, &bytes).unwrap();
+        let sync_record = SyncRecord {
+            path: "file0".to_string(),
+            local_hash: "something".to_string(),
+            server_version: 0,
+            upload_id: Some("test_upload".to_string()),
+        };
+        db::put(&db, &sync_record).unwrap();
+        mock_client.set_upload_fail_id("test_upload".to_string());
+
+        push_single_file_chunked(&db, &mock_client, temp_dir.path(), &file, &noop_progress())
+            .await
+            .unwrap();
+
+        let record = db::get(&db, "file0").unwrap();
+        assert!(record.is_some());
+        assert!(record.unwrap().upload_id.is_none());
+        assert_eq!(*mock_client.init_upload_count.borrow(), 1);
+        assert_eq!(*mock_client.send_chunk_count.borrow(), 1);
+        assert_eq!(*mock_client.finalize_upload_count.borrow(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_push_single_file_chunked_crashes() {
+        let (db, mock_client, temp_dir) = setup();
+        let file = temp_dir.path().join("file0");
+        let bytes = b"hello world";
+        std::fs::write(&file, &bytes).unwrap();
+        mock_client.set_send_chunk_fails(true);
+
+        let result =
+            push_single_file_chunked(&db, &mock_client, temp_dir.path(), &file, &noop_progress())
+                .await;
+
+        let record = db::get(&db, "file0").unwrap();
+        assert!(result.is_err());
+        assert!(record.is_some());
+        assert!(record.unwrap().upload_id.is_some());
+        assert_eq!(*mock_client.init_upload_count.borrow(), 1);
+        assert_eq!(*mock_client.send_chunk_count.borrow(), 1);
+        assert_eq!(*mock_client.finalize_upload_count.borrow(), 0);
     }
 
     #[tokio::test]
@@ -498,8 +698,9 @@ mod tests {
             path: "file0".to_string(),
             local_hash: hash_bytes(bytes),
             server_version: 0,
+            upload_id: None,
         };
-        db::put(&db, sync_record).unwrap();
+        db::put(&db, &sync_record).unwrap();
 
         push_single_file(&db, &mock_client, temp_dir.path(), &file)
             .await
@@ -516,7 +717,9 @@ mod tests {
         std::fs::write(file0, b"hello world").unwrap();
         std::fs::write(file1, b"hello world").unwrap();
 
-        push(&db, &mock_client, temp_dir.path()).await.unwrap();
+        push(&db, &mock_client, temp_dir.path(), &noop_progress())
+            .await
+            .unwrap();
 
         assert_eq!(*mock_client.create_count.borrow(), 2);
         assert_eq!(*mock_client.delete_count.borrow(), 0);
@@ -530,10 +733,13 @@ mod tests {
             path: "file0".to_string(),
             local_hash: hash_bytes(bytes),
             server_version: 0,
+            upload_id: None,
         };
-        db::put(&db, sync_record).unwrap();
+        db::put(&db, &sync_record).unwrap();
 
-        push(&db, &mock_client, temp_dir.path()).await.unwrap();
+        push(&db, &mock_client, temp_dir.path(), &noop_progress())
+            .await
+            .unwrap();
 
         assert_eq!(*mock_client.create_count.borrow(), 0);
         assert_eq!(*mock_client.delete_count.borrow(), 1);
@@ -551,10 +757,13 @@ mod tests {
             path: "file0".to_string(),
             local_hash: hash_bytes(bytes),
             server_version: 0,
+            upload_id: None,
         };
-        db::put(&db, sync_record).unwrap();
+        db::put(&db, &sync_record).unwrap();
 
-        push(&db, &mock_client, temp_dir.path()).await.unwrap();
+        push(&db, &mock_client, temp_dir.path(), &noop_progress())
+            .await
+            .unwrap();
 
         assert_eq!(*mock_client.create_count.borrow(), 1);
         assert_eq!(*mock_client.delete_count.borrow(), 0);
@@ -582,8 +791,9 @@ mod tests {
             path: "file0".to_string(),
             local_hash: hash_bytes(bytes),
             server_version: 2,
+            upload_id: None,
         };
-        db::put(&db, sync_record).unwrap();
+        db::put(&db, &sync_record).unwrap();
 
         pull_single_file(&db, &mock_client, temp_dir.path(), &file_meta)
             .await
@@ -605,8 +815,9 @@ mod tests {
             path: "file0".to_string(),
             local_hash: hash_bytes(bytes),
             server_version: 1,
+            upload_id: None,
         };
-        db::put(&db, sync_record).unwrap();
+        db::put(&db, &sync_record).unwrap();
 
         pull_single_file(&db, &mock_client, temp_dir.path(), &file_meta)
             .await
@@ -630,8 +841,9 @@ mod tests {
             path: "subdir/file0".to_string(),
             local_hash: "somethingelse".to_string(),
             server_version: 1,
+            upload_id: None,
         };
-        db::put(&db, sync_record).unwrap();
+        db::put(&db, &sync_record).unwrap();
 
         pull_single_file(&db, &mock_client, temp_dir.path(), &file_meta)
             .await

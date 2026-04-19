@@ -34,7 +34,7 @@ pub fn list(db: &Database) -> anyhow::Result<Vec<SyncRecord>> {
     Ok(records)
 }
 
-pub fn put(db: &Database, sync_record: SyncRecord) -> anyhow::Result<()> {
+pub fn put(db: &Database, sync_record: &SyncRecord) -> anyhow::Result<()> {
     let tx = db.begin_write()?;
     {
         let mut table = tx.open_table(TABLE)?;
