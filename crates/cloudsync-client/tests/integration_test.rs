@@ -173,6 +173,6 @@ async fn test_pull_conflict() {
     assert!(conflict_exist);
 }
 
-fn noop_progress() -> impl Fn(&str, u64) -> Box<dyn Fn()> {
-    |_: &str, _: u64| -> Box<dyn Fn()> { Box::new(|| {}) }
+fn noop_progress() -> impl Fn(&str, u64, u64) -> Box<dyn Fn()> {
+    |_: &str, _: u64, _: u64| -> Box<dyn Fn()> { Box::new(|| {}) }
 }

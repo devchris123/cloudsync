@@ -44,7 +44,7 @@ pub async fn push(
     db: &Database,
     sync_client: &impl SyncApi,
     sync_root: &Path,
-    on_file_start: &impl Fn(&str, u64) -> Box<dyn Fn()>,
+    on_file_start: &impl Fn(&str, u64, u64) -> Box<dyn Fn()>,
 ) -> anyhow::Result<()> {
     let ignored = scanner::get_ignored(sync_root);
     let local_paths = scanner::scan_dir(sync_root, &ignored)?;
@@ -120,7 +120,7 @@ pub async fn push_single_file_chunked(
     sync_client: &impl SyncApi,
     sync_root: &Path,
     local_path: &Path,
-    on_file_start: &impl Fn(&str, u64) -> Box<dyn Fn()>,
+    on_file_start: &impl Fn(&str, u64, u64) -> Box<dyn Fn()>,
 ) -> anyhow::Result<()> {
     let total_size = local_path.metadata()?.len();
     let chunk_count = total_size.div_ceil(CHUNK_SIZE);
@@ -187,7 +187,7 @@ pub async fn resume_upload(
     chunk_count: u64,
     rel_path: String,
     hash: String,
-    on_file_start: impl Fn(&str, u64) -> Box<dyn Fn()>,
+    on_file_start: impl Fn(&str, u64, u64) -> Box<dyn Fn()>,
 ) -> anyhow::Result<()> {
     if let Some(sr) = &mut sync_record {
         sr.upload_id = Some(upload_id.to_string());
@@ -209,7 +209,7 @@ pub async fn resume_upload(
         .unwrap_or(5);
     let mut join_set = vec![];
 
-    let on_progress = on_file_start(&rel_path, chunk_count);
+    let on_progress = on_file_start(&rel_path, chunk_count, chunks_received.len() as u64);
     for idx in 0..chunk_count {
         let mut buf = Vec::new();
         (&mut file).take(CHUNK_SIZE).read_to_end(&mut buf)?;
@@ -573,8 +573,8 @@ mod tests {
         return (db, mock_client, temp_dir);
     }
 
-    fn noop_progress() -> impl Fn(&str, u64) -> Box<dyn Fn()> {
-        |_: &str, _: u64| -> Box<dyn Fn()> { Box::new(|| {}) }
+    fn noop_progress() -> impl Fn(&str, u64, u64) -> Box<dyn Fn()> {
+        |_: &str, _: u64, _: u64| -> Box<dyn Fn()> { Box::new(|| {}) }
     }
 
     #[tokio::test]
@@ -628,7 +628,7 @@ mod tests {
         mock_client.set_upload_chunks_received(vec![1, 3, 4]);
         mock_client.set_upload_chunk_count(5);
 
-        push_single_file_chunked(&db, &mock_client, temp_dir.path(), &file, &&noop_progress())
+        push_single_file_chunked(&db, &mock_client, temp_dir.path(), &file, &noop_progress())
             .await
             .unwrap();
 

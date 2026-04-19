@@ -26,8 +26,9 @@ async fn main() -> anyhow::Result<()> {
         cli::Command::Push => {
             let (db, sync_client, sync_root) = setup().await?;
             let mp = MultiProgress::new();
-            let on_file_start = |path: &str, count: u64| -> Box<dyn Fn()> {
+            let on_file_start = |path: &str, count: u64, completed: u64| -> Box<dyn Fn()> {
                 let pb = mp.add(ProgressBar::new(count));
+                pb.set_position(completed);
                 pb.set_style(ProgressStyle::with_template("{msg} [{bar:20}] {pos}/{len}").unwrap());
                 pb.set_message(path.to_string());
                 Box::new(move || pb.inc(1))
