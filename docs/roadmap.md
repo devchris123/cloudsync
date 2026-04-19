@@ -29,7 +29,6 @@ See GitHub issues for details:
 - Skip completed chunks, upload only what's missing
 - Handle expired/cleaned-up uploads gracefully (restart from scratch)
 - Parallel chunk uploads (e.g. `tokio::JoinSet`) for faster large-file transfers
-- Graceful upload cancellation (Ctrl+C / cancellation token) — upload ID persisted so it can resume later
 - Parallel small-file uploads to reduce latency overhead when syncing many files below chunk threshold
 
 ### Resumable downloads
@@ -72,6 +71,7 @@ See GitHub issues for details:
 - Watch a local folder, auto-sync changes (push on file change, periodic pull)
 - Reuse existing Rust client crate as the sync engine
 - Minimal UI: sync status, recent activity, settings (server URL, token, sync folder)
+- Graceful upload cancellation (cancellation token) — cancel button needs to stop uploads without killing the app
 
 ### Conflict resolution UX
 - Surface conflicts in the desktop app and web UI
