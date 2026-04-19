@@ -38,6 +38,15 @@ See GitHub issues for details:
 
 ---
 
+## Phase 1.5: Storage hygiene
+
+### Server-side garbage collection
+- Purge incomplete/expired uploads (orphaned chunks from abandoned uploads)
+- Permanently remove soft-deleted files (`is_deleted`) after a configurable retention period
+- Reclaim content-addressable blobs no longer referenced by any file metadata
+
+---
+
 ## Phase 2: Encryption
 
 ### Client-side E2E encryption
