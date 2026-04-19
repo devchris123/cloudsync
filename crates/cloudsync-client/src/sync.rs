@@ -199,15 +199,37 @@ pub async fn resume_upload(
     }
 
     let mut file = std::fs::File::open(local_path)?;
+    let batch_size: usize = std::env::var("CLOUDSYNC_BATCH_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+    let mut join_set = vec![];
+
     let chunks_received: std::collections::HashSet<u32> = chunks_received.into_iter().collect();
-    for i in 0..chunk_count {
+    for idx in 0..chunk_count {
         let mut buf = Vec::new();
         (&mut file).take(CHUNK_SIZE).read_to_end(&mut buf)?;
-        if chunks_received.contains(&(i as u32)) {
+        // Do the skip after reading file, so the file pointer correctly advances for the next read.
+        if chunks_received.contains(&(idx as u32)) {
             continue;
         }
-        sync_client.send_chunk(&upload_id, i as u32, buf).await?;
+        let fut = sync_client.send_chunk(&upload_id, idx as u32, buf);
+        join_set.push(fut);
+        if join_set.len() == batch_size {
+            let results = futures::future::join_all(join_set.drain(..)).await;
+            for res in results {
+                res?;
+            }
+        }
     }
+    // Final flush in case we skipped the last chunk before the loop ends
+    if !join_set.is_empty() {
+        let results = futures::future::join_all(join_set.drain(..)).await;
+        for res in results {
+            res?;
+        }
+    }
+
     let resp = sync_client.finalize_upload(&upload_id).await?;
     let sync_record = SyncRecord {
         path: rel_path.clone(),
