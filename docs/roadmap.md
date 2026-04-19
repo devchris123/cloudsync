@@ -30,6 +30,7 @@ See GitHub issues for details:
 - Handle expired/cleaned-up uploads gracefully (restart from scratch)
 - Parallel chunk uploads (e.g. `tokio::JoinSet`) for faster large-file transfers
 - Graceful upload cancellation (Ctrl+C / cancellation token) — upload ID persisted so it can resume later
+- Parallel small-file uploads to reduce latency overhead when syncing many files below chunk threshold
 
 ### Resumable downloads
 - Server: support HTTP `Range` requests on `GET /api/v1/files/{path}`
