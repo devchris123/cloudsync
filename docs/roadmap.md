@@ -28,6 +28,8 @@ See GitHub issues for details:
 - Client checks `GET /api/v1/uploads/{upload_id}` on start to find already-received chunks
 - Skip completed chunks, upload only what's missing
 - Handle expired/cleaned-up uploads gracefully (restart from scratch)
+- Parallel chunk uploads (e.g. `tokio::JoinSet`) for faster large-file transfers
+- Graceful upload cancellation (Ctrl+C / cancellation token) — upload ID persisted so it can resume later
 
 ### Resumable downloads
 - Server: support HTTP `Range` requests on `GET /api/v1/files/{path}`
