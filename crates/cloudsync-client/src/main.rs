@@ -6,7 +6,7 @@ use redb::Database;
 
 use crate::config::ClientConfig;
 
-use cloudsync_client::{cli, client, config, db, sync, ui};
+use cloudsync_client::{cli, client, config, db, sync};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
