@@ -177,6 +177,7 @@ pub async fn push_single_file_chunked(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn resume_upload(
     upload_id: &str,
     db: &Database,
@@ -191,7 +192,7 @@ pub async fn resume_upload(
 ) -> anyhow::Result<()> {
     if let Some(sr) = &mut sync_record {
         sr.upload_id = Some(upload_id.to_string());
-        db::put(db, &sr)?;
+        db::put(db, sr)?;
     } else {
         let sr = SyncRecord {
             path: rel_path.clone(),
@@ -218,7 +219,7 @@ pub async fn resume_upload(
         if chunks_received.contains(&(idx as u32)) {
             continue;
         }
-        let fut = sync_client.send_chunk(&upload_id, idx as u32, buf);
+        let fut = sync_client.send_chunk(upload_id, idx as u32, buf);
         join_set.push(fut);
         if join_set.len() == batch_size {
             let results = futures::future::join_all(join_set.drain(..)).await;
@@ -236,7 +237,7 @@ pub async fn resume_upload(
         }
     }
 
-    let resp = sync_client.finalize_upload(&upload_id).await?;
+    let resp = sync_client.finalize_upload(upload_id).await?;
     let sync_record = SyncRecord {
         path: rel_path.clone(),
         local_hash: hash,
