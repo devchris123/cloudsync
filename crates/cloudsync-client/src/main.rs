@@ -25,19 +25,13 @@ async fn main() -> anyhow::Result<()> {
         }
         cli::Command::Push => {
             let (db, sync_client, sync_root) = setup().await?;
-            let mp = MultiProgress::new();
-            let on_file_start = |path: &str, count: u64, completed: u64| -> Box<dyn Fn()> {
-                let pb = mp.add(ProgressBar::new(count));
-                pb.set_position(completed);
-                pb.set_style(ProgressStyle::with_template("{msg} [{bar:20}] {pos}/{len}").unwrap());
-                pb.set_message(path.to_string());
-                Box::new(move || pb.inc(1))
-            };
+            let on_file_start = create_on_file_start_fixed_inc();
             sync::push(&db, &sync_client, &sync_root, &on_file_start).await?;
         }
         cli::Command::Pull => {
             let (db, sync_client, sync_root) = setup().await?;
-            sync::pull(&db, &sync_client, &sync_root).await?;
+            let on_file_start = create_on_file_start_var_inc();
+            sync::pull(&db, &sync_client, &sync_root, &on_file_start).await?;
         }
         cli::Command::Status => {
             let (db, sync_client, sync_root) = setup().await?;
@@ -65,4 +59,26 @@ fn load_config() -> anyhow::Result<ClientConfig> {
         anyhow::bail!("Not initialized. Run 'cloudsync init' first.")
     }
     config::ClientConfig::load()
+}
+
+fn create_on_file_start_fixed_inc() -> impl Fn(&str, u64, u64) -> Box<dyn Fn()> {
+    let mp = MultiProgress::new();
+    move |path: &str, count: u64, completed: u64| -> Box<dyn Fn()> {
+        let pb = mp.add(ProgressBar::new(count));
+        pb.set_position(completed);
+        pb.set_style(ProgressStyle::with_template("{msg} [{bar:20}] {pos}/{len}").unwrap());
+        pb.set_message(path.to_string());
+        Box::new(move || pb.inc(1))
+    }
+}
+
+fn create_on_file_start_var_inc() -> impl Fn(&str, u64, u64) -> Box<dyn Fn(u64)> {
+    let mp = MultiProgress::new();
+    move |path: &str, count: u64, completed: u64| -> Box<dyn Fn(u64)> {
+        let pb = mp.add(ProgressBar::new(count));
+        pb.set_position(completed);
+        pb.set_style(ProgressStyle::with_template("{msg} [{bar:20}] {pos}/{len}").unwrap());
+        pb.set_message(path.to_string());
+        Box::new(move |inc: u64| pb.inc(inc))
+    }
 }
