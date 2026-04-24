@@ -10,6 +10,8 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
 };
+use tower::ServiceExt;
+use tower_http::services::ServeFile;
 use tower_http::trace::TraceLayer;
 
 use cloudsync_common::{
@@ -97,6 +99,7 @@ async fn delete_file(
 async fn get_file(
     State(state): State<AppState>,
     Path(path): Path<String>,
+    request: Request,
 ) -> Result<impl IntoResponse, AppError> {
     let db: Arc<Database> = state.db;
     let file_meta = db::get(&db, &path)?;
@@ -113,13 +116,9 @@ async fn get_file(
         file_meta.version
     );
     let content_hash = file_meta.content_hash;
-    let file = storage::read_async(&state.storage_dir, &content_hash).await?;
-    let reader_stream = tokio_util::io::ReaderStream::new(file);
-    let headers = [(
-        axum::http::header::CONTENT_LENGTH,
-        file_meta.size.to_string(),
-    )];
-    Ok((headers, axum::body::Body::from_stream(reader_stream)))
+    let path = storage::get_storage_path(&state.storage_dir, &content_hash);
+    let resp = ServeFile::new(path).oneshot(request).await?;
+    Ok(resp.into_response())
 }
 
 async fn create_upload(

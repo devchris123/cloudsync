@@ -6,6 +6,58 @@ use reqwest::StatusCode;
 use tokio::{self, net::TcpListener};
 
 #[tokio::test]
+async fn test_range_download() {
+    // start server
+    let token = "HELLO";
+    let storage_dir = tempfile::TempDir::new().unwrap();
+    let staging_dir = storage_dir.path().join("staging");
+    let storage_dir_str = storage_dir.path().to_str().unwrap().to_string();
+    let dbname = storage_dir
+        .path()
+        .join("server.redb")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let server = cloudsync_server::app::bootstrap_app(ServerConfig {
+        storage_dir: storage_dir_str,
+        staging_dir: staging_dir.to_str().unwrap().to_string(),
+        token: token.to_string(),
+        dbname: dbname.to_string(),
+    })
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+
+    // Initial upload
+    let base_url = format!("http://{addr}");
+    let client = reqwest::Client::new();
+    let file_bytes = b"abc";
+    let form = reqwest::multipart::Form::new()
+        .text("path", "my/file")
+        .part("file", reqwest::multipart::Part::bytes(file_bytes));
+    let response = client
+        .post(format!("{base_url}/api/v1/files"))
+        .bearer_auth(token)
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    assert_eq!(status, StatusCode::OK);
+    let response = client
+        .get(format!("{base_url}/api/v1/files/my/file"))
+        .bearer_auth(token)
+        .header("Range", "bytes=2-")
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), b"c");
+}
+
+#[tokio::test]
 async fn test_chunked_upload() {
     // start server
     let token = "HELLO";

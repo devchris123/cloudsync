@@ -9,13 +9,6 @@ pub fn write(data_dir: &str, content: &[u8]) -> anyhow::Result<String> {
     Ok(content_hash)
 }
 
-pub async fn read_async(data_dir: &str, content_hash: &str) -> anyhow::Result<tokio::fs::File> {
-    let dir = std::path::Path::new(data_dir).join(&content_hash[0..2]);
-    let path = dir.join(content_hash);
-    let file = tokio::fs::File::open(path).await?;
-    Ok(file)
-}
-
 pub fn get_storage_path(data_dir: &str, total_hash: &str) -> std::path::PathBuf {
     std::path::Path::new(data_dir)
         .join(&total_hash[0..2])
@@ -42,5 +35,11 @@ mod test {
         let mut buf = Vec::new();
         file.take(1000).read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf.as_slice(), bytes);
+    }
+
+    async fn read_async(data_dir: &str, content_hash: &str) -> anyhow::Result<tokio::fs::File> {
+        let path = get_storage_path(data_dir, content_hash);
+        let file = tokio::fs::File::open(path).await?;
+        Ok(file)
     }
 }
