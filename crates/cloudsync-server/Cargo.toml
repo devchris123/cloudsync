@@ -16,6 +16,7 @@ serde_json = { workspace = true }
 clap = { workspace = true }
 tracing-subscriber = { workspace = true }
 tower-http = { workspace = true }
+tower = { workspace = true }
 tracing = { workspace = true }
 nanoid = "0.4"
 # Web UI
