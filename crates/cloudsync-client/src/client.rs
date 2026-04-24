@@ -2,9 +2,9 @@ use cloudsync_common::{
     CreateFileResponse, DeleteFileResponse, FinalizeUploadResponse, GetUploadResponse,
     InitUploadRequest, InitUploadResponse, ListFilesResponse,
 };
-use tokio::io::AsyncRead;
+use reqwest::StatusCode;
 
-use crate::sync::SyncApi;
+use crate::sync::{DownloadFileResponse, SyncApi};
 use futures::TryStreamExt;
 
 pub struct SyncClient {
@@ -78,10 +78,16 @@ impl SyncApi for SyncClient {
         Ok(serde_json::from_slice::<CreateFileResponse>(&bytes)?)
     }
 
-    async fn get_file(&self, path: &str) -> anyhow::Result<Box<dyn AsyncRead + Unpin + Send>> {
+    async fn get_file(&self, path: &str, start_bytes: u64) -> anyhow::Result<DownloadFileResponse> {
         let url = format!("{}/{}/{}", self.server_url, "api/v1/files", path);
         tracing::debug!("request: {} {}", "get", &url);
-        let resp = self.client.get(url).bearer_auth(&self.token).send().await?;
+
+        let mut req = self.client.get(url).bearer_auth(&self.token);
+        if start_bytes > 0 {
+            req = req.header(reqwest::header::RANGE, format!("bytes={start_bytes}-"));
+        }
+        let resp = req.send().await?;
+
         let status = resp.status();
         if !status.is_success() {
             anyhow::bail!(
@@ -93,7 +99,11 @@ impl SyncApi for SyncClient {
         let bytes_stream = resp.bytes_stream();
         let stream = bytes_stream.map_err(std::io::Error::other);
         let reader = tokio_util::io::StreamReader::new(stream);
-        Ok(Box::new(reader))
+
+        Ok(DownloadFileResponse {
+            resumed: status == StatusCode::PARTIAL_CONTENT,
+            stream: Box::new(reader),
+        })
     }
 
     async fn delete_file(&self, path: &str) -> anyhow::Result<DeleteFileResponse> {
