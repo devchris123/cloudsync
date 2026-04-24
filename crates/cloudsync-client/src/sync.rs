@@ -1,5 +1,5 @@
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use cloudsync_common::{
     CreateFileResponse, DeleteFileResponse, FileMeta, FinalizeUploadResponse, GetUploadResponse,
@@ -14,12 +14,17 @@ use crate::scanner::{self, scan_dir};
 
 pub const CHUNK_SIZE: u64 = 4 * 1024 * 1024;
 
+pub struct DownloadFileResponse {
+    pub resumed: bool,
+    pub stream: Box<dyn AsyncRead + Unpin + Send>,
+}
+
 #[allow(async_fn_in_trait)]
 pub trait SyncApi {
     async fn list_files(&self) -> anyhow::Result<ListFilesResponse>;
     async fn create_file(&self, path: &str, content: Vec<u8>)
     -> anyhow::Result<CreateFileResponse>;
-    async fn get_file(&self, path: &str) -> anyhow::Result<Box<dyn AsyncRead + Unpin + Send>>;
+    async fn get_file(&self, path: &str, start_bytes: u64) -> anyhow::Result<DownloadFileResponse>;
     async fn delete_file(&self, path: &str) -> anyhow::Result<DeleteFileResponse>;
     async fn init_upload(&self, request: InitUploadRequest) -> anyhow::Result<InitUploadResponse>;
     async fn send_chunk(
@@ -304,9 +309,22 @@ async fn pull_single_file(
                     let conflict_path = sync_root
                         .join(&file_meta.path)
                         .with_file_name(conflict_path);
-                    let mut file = tokio::fs::File::create(&conflict_path).await?;
-                    let mut stream_reader = sync_client.get_file(&file_meta.path).await?;
-                    tokio::io::copy(&mut stream_reader, &mut file).await?;
+
+                    let mut conflict_path_backup = conflict_path.as_os_str().to_owned();
+                    conflict_path_backup.push(".part");
+                    let conflict_path_backup = PathBuf::from(conflict_path_backup);
+
+                    download_to_file(sync_client, &file_meta.path, &conflict_path_backup).await?;
+
+                    let conflict_backup_hash = hash_file(&conflict_path_backup)?;
+                    if file_meta.content_hash != conflict_backup_hash {
+                        std::fs::remove_file(conflict_path_backup)?;
+                        anyhow::bail!(
+                            "Corrupt download: hash does not match for {}",
+                            &file_meta.path
+                        );
+                    }
+                    std::fs::rename(conflict_path_backup, &conflict_path)?;
                     println!("Conflict: resolve conflict in {}", conflict_path.display());
                     return Ok(());
                 }
@@ -318,18 +336,49 @@ async fn pull_single_file(
     if let Some(parent_dir) = parent_dir {
         std::fs::create_dir_all(parent_dir)?;
     };
-    let mut stream_reader = sync_client.get_file(&file_meta.path).await?;
-    let mut file = tokio::fs::File::create(local_path).await?;
-    tokio::io::copy(&mut stream_reader, &mut file).await?;
+    let mut local_path_backup = local_path.as_os_str().to_owned();
+    local_path_backup.push(".part");
+    let local_path_backup = PathBuf::from(local_path_backup);
+    download_to_file(sync_client, &file_meta.path, &local_path_backup).await?;
+    let local_backup_hash = hash_file(&local_path_backup)?;
+    if file_meta.content_hash != local_backup_hash {
+        std::fs::remove_file(local_path_backup)?;
+        anyhow::bail!(
+            "Corrupt download: hash does not match for {}",
+            &file_meta.path
+        );
+    }
+    std::fs::rename(local_path_backup, local_path)?;
     let sync_record = SyncRecord {
         path: file_meta.path.clone(),
-        local_hash: hash_file(local_path)?,
+        local_hash: local_backup_hash,
         server_version: file_meta.version,
         upload_id: None,
     };
     db::put(db, &sync_record)?;
     println!("pulled: {}", &file_meta.path);
 
+    Ok(())
+}
+
+pub async fn download_to_file(
+    sync_client: &impl SyncApi,
+    src_path: &str,
+    dest: &Path,
+) -> anyhow::Result<()> {
+    let bytes_on_file = tokio::fs::metadata(&dest)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let mut resp = sync_client.get_file(src_path, bytes_on_file).await?;
+    let mut file_opts = tokio::fs::OpenOptions::new();
+    file_opts.create(true);
+    let mut file = if resp.resumed {
+        file_opts.append(true).open(&dest).await?
+    } else {
+        file_opts.truncate(true).write(true).open(&dest).await?
+    };
+    tokio::io::copy(&mut resp.stream, &mut file).await?;
     Ok(())
 }
 
@@ -493,12 +542,15 @@ mod tests {
             })
         }
 
-        async fn get_file(&self, path: &str) -> anyhow::Result<Box<dyn AsyncRead + Unpin + Send>> {
+        async fn get_file(&self, path: &str, _bytes: u64) -> anyhow::Result<DownloadFileResponse> {
             if self.fail_path.borrow().as_deref() == Some(path) {
                 anyhow::bail!("error");
             }
             *self.get_count.borrow_mut() += 1;
-            Ok(Box::new(std::io::Cursor::new(Vec::new())))
+            Ok(DownloadFileResponse {
+                resumed: false,
+                stream: Box::new(std::io::Cursor::new(Vec::new())),
+            })
         }
 
         async fn delete_file(&self, _path: &str) -> anyhow::Result<DeleteFileResponse> {
@@ -866,7 +918,7 @@ mod tests {
         FileMeta {
             path: path.to_string(),
             size: 0,
-            content_hash: "".to_string(),
+            content_hash: hash_bytes(&[]),
             version,
             is_deleted: false,
             created_at: chrono::Utc::now(),
