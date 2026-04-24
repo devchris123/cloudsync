@@ -1,5 +1,6 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
 use cloudsync_common::{
     CreateFileResponse, DeleteFileResponse, FileMeta, FinalizeUploadResponse, GetUploadResponse,
@@ -17,6 +18,27 @@ pub const CHUNK_SIZE: u64 = 4 * 1024 * 1024;
 pub struct DownloadFileResponse {
     pub resumed: bool,
     pub stream: Box<dyn AsyncRead + Unpin + Send>,
+}
+
+struct ProgressReader<R> {
+    inner: R,
+    on_bytes: Box<dyn Fn(u64)>,
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for ProgressReader<R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let result = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if let std::task::Poll::Ready(Ok(())) = &result {
+            let bytes_read = buf.filled().len() - before;
+            (self.on_bytes)(bytes_read as u64);
+        }
+        result
+    }
 }
 
 #[allow(async_fn_in_trait)]
@@ -269,10 +291,13 @@ pub async fn pull(
     db: &Database,
     sync_client: &impl SyncApi,
     sync_root: &Path,
+    on_file_start: &impl Fn(&str, u64, u64) -> Box<dyn Fn(u64)>,
 ) -> anyhow::Result<()> {
     let file_metas = sync_client.list_files().await?.files;
     for file_meta in file_metas {
-        if let Err(e) = pull_single_file(db, sync_client, sync_root, &file_meta).await {
+        if let Err(e) =
+            pull_single_file(db, sync_client, sync_root, &file_meta, on_file_start).await
+        {
             println!("error pulling {}: {}", &file_meta.path, e);
             continue;
         }
@@ -285,6 +310,7 @@ async fn pull_single_file(
     sync_client: &impl SyncApi,
     sync_root: &Path,
     file_meta: &FileMeta,
+    on_file_start: &impl Fn(&str, u64, u64) -> Box<dyn Fn(u64)>,
 ) -> anyhow::Result<()> {
     let record = db::get(db, &file_meta.path)?;
 
@@ -314,8 +340,18 @@ async fn pull_single_file(
                     conflict_path_backup.push(".part");
                     let conflict_path_backup = PathBuf::from(conflict_path_backup);
 
-                    download_to_file(sync_client, &file_meta.path, &conflict_path_backup).await?;
-
+                    let bytes_on_file = tokio::fs::metadata(&conflict_path_backup)
+                        .await
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    let on_bytes = on_file_start(&file_meta.path, file_meta.size, bytes_on_file);
+                    download_to_file(
+                        sync_client,
+                        &file_meta.path,
+                        &conflict_path_backup,
+                        on_bytes,
+                    )
+                    .await?;
                     let conflict_backup_hash = hash_file(&conflict_path_backup)?;
                     if file_meta.content_hash != conflict_backup_hash {
                         std::fs::remove_file(conflict_path_backup)?;
@@ -339,7 +375,13 @@ async fn pull_single_file(
     let mut local_path_backup = local_path.as_os_str().to_owned();
     local_path_backup.push(".part");
     let local_path_backup = PathBuf::from(local_path_backup);
-    download_to_file(sync_client, &file_meta.path, &local_path_backup).await?;
+
+    let bytes_on_file = tokio::fs::metadata(&local_path_backup)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let on_bytes = on_file_start(&file_meta.path, file_meta.size, bytes_on_file);
+    download_to_file(sync_client, &file_meta.path, &local_path_backup, on_bytes).await?;
     let local_backup_hash = hash_file(&local_path_backup)?;
     if file_meta.content_hash != local_backup_hash {
         std::fs::remove_file(local_path_backup)?;
@@ -365,12 +407,13 @@ pub async fn download_to_file(
     sync_client: &impl SyncApi,
     src_path: &str,
     dest: &Path,
+    on_bytes: Box<dyn Fn(u64)>,
 ) -> anyhow::Result<()> {
     let bytes_on_file = tokio::fs::metadata(&dest)
         .await
         .map(|m| m.len())
         .unwrap_or(0);
-    let mut resp = sync_client.get_file(src_path, bytes_on_file).await?;
+    let resp = sync_client.get_file(src_path, bytes_on_file).await?;
     let mut file_opts = tokio::fs::OpenOptions::new();
     file_opts.create(true);
     let mut file = if resp.resumed {
@@ -378,7 +421,11 @@ pub async fn download_to_file(
     } else {
         file_opts.truncate(true).write(true).open(&dest).await?
     };
-    tokio::io::copy(&mut resp.stream, &mut file).await?;
+    let mut progress_streamer = ProgressReader {
+        inner: resp.stream,
+        on_bytes,
+    };
+    tokio::io::copy(&mut progress_streamer, &mut file).await?;
     Ok(())
 }
 
@@ -631,6 +678,10 @@ mod tests {
         |_: &str, _: u64, _: u64| -> Box<dyn Fn()> { Box::new(|| {}) }
     }
 
+    fn noop_download_progress() -> impl Fn(&str, u64, u64) -> Box<dyn Fn(u64)> {
+        |_: &str, _: u64, _: u64| -> Box<dyn Fn(u64)> { Box::new(|_| {}) }
+    }
+
     #[tokio::test]
     async fn test_push_single_file() {
         let (db, mock_client, temp_dir) = setup();
@@ -829,9 +880,15 @@ mod tests {
 
         let file_meta = make_file_meta("file0", 0);
 
-        pull_single_file(&db, &mock_client, temp_dir.path(), &file_meta)
-            .await
-            .unwrap();
+        pull_single_file(
+            &db,
+            &mock_client,
+            temp_dir.path(),
+            &file_meta,
+            &noop_download_progress(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(*mock_client.get_count.borrow(), 1);
     }
@@ -849,9 +906,15 @@ mod tests {
         };
         db::put(&db, &sync_record).unwrap();
 
-        pull_single_file(&db, &mock_client, temp_dir.path(), &file_meta)
-            .await
-            .unwrap();
+        pull_single_file(
+            &db,
+            &mock_client,
+            temp_dir.path(),
+            &file_meta,
+            &noop_download_progress(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(*mock_client.get_count.borrow(), 0);
     }
@@ -873,9 +936,15 @@ mod tests {
         };
         db::put(&db, &sync_record).unwrap();
 
-        pull_single_file(&db, &mock_client, temp_dir.path(), &file_meta)
-            .await
-            .unwrap();
+        pull_single_file(
+            &db,
+            &mock_client,
+            temp_dir.path(),
+            &file_meta,
+            &noop_download_progress(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(*mock_client.get_count.borrow(), 1);
     }
@@ -899,9 +968,15 @@ mod tests {
         };
         db::put(&db, &sync_record).unwrap();
 
-        pull_single_file(&db, &mock_client, temp_dir.path(), &file_meta)
-            .await
-            .unwrap();
+        pull_single_file(
+            &db,
+            &mock_client,
+            temp_dir.path(),
+            &file_meta,
+            &noop_download_progress(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(*mock_client.get_count.borrow(), 1);
         let conflict_exists = std::fs::read_dir(subdir).unwrap().into_iter().any(|f| {
@@ -937,7 +1012,14 @@ mod tests {
         let file_meta1 = make_file_meta("file01", 2);
         mock_client.set_files(vec![file_meta0, file_meta1]);
 
-        pull(&db, &mock_client, temp_dir.path()).await.unwrap();
+        pull(
+            &db,
+            &mock_client,
+            temp_dir.path(),
+            &noop_download_progress(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(*mock_client.list_count.borrow(), 1);
         assert_eq!(*mock_client.get_count.borrow(), 2)
@@ -955,7 +1037,14 @@ mod tests {
         mock_client.set_files(vec![file_meta0, file_meta1]);
         mock_client.set_fail_path("file1".to_string());
 
-        pull(&db, &mock_client, temp_dir.path()).await.unwrap();
+        pull(
+            &db,
+            &mock_client,
+            temp_dir.path(),
+            &noop_download_progress(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(*mock_client.list_count.borrow(), 1);
         assert_eq!(*mock_client.get_count.borrow(), 1)

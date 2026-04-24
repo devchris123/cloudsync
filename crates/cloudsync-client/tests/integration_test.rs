@@ -8,6 +8,10 @@ use cloudsync_client::{
 use cloudsync_server::config::ServerConfig;
 use tokio::{self, net::TcpListener};
 
+fn noop_download_progress() -> impl Fn(&str, u64, u64) -> Box<dyn Fn(u64)> {
+    |_: &str, _: u64, _: u64| -> Box<dyn Fn(u64)> { Box::new(|_| {}) }
+}
+
 #[tokio::test]
 async fn test_push_and_pull() {
     // start server
@@ -65,9 +69,14 @@ async fn test_push_and_pull() {
     let other_client_root_dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir_all(other_client_root_dir.path().join(".cloudsync")).unwrap();
     let other_db = open_db(other_client_root_dir.path()).unwrap();
-    sync::pull(&other_db, &sync_client, other_client_root_dir.path())
-        .await
-        .unwrap();
+    sync::pull(
+        &other_db,
+        &sync_client,
+        other_client_root_dir.path(),
+        &noop_download_progress(),
+    )
+    .await
+    .unwrap();
 
     // assert
     let pulled_bytes0 = std::fs::read(other_client_root_dir.path().join("file0")).unwrap();
@@ -136,9 +145,14 @@ async fn test_pull_conflict() {
     let other_client_root_dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir_all(other_client_root_dir.path().join(".cloudsync")).unwrap();
     let other_db = open_db(other_client_root_dir.path()).unwrap();
-    sync::pull(&other_db, &sync_client, other_client_root_dir.path())
-        .await
-        .unwrap();
+    sync::pull(
+        &other_db,
+        &sync_client,
+        other_client_root_dir.path(),
+        &noop_download_progress(),
+    )
+    .await
+    .unwrap();
     std::fs::write(
         other_client_root_dir.path().join("file0"),
         "hello world other client changed",
@@ -154,9 +168,14 @@ async fn test_pull_conflict() {
     .unwrap();
 
     // Pull with first client again
-    sync::pull(&db, &sync_client, client_root_dir.path())
-        .await
-        .unwrap();
+    sync::pull(
+        &db,
+        &sync_client,
+        client_root_dir.path(),
+        &noop_download_progress(),
+    )
+    .await
+    .unwrap();
 
     // assert
     let bytes0 = std::fs::read(client_root_dir.path().join("file0")).unwrap();
