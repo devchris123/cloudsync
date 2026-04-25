@@ -36,6 +36,10 @@ See GitHub issues for details:
 - Client: on interrupted download, resume from last byte received
 - Verify final file hash after reassembly
 
+### Client refactoring
+- Split `sync.rs` into `push.rs`, `pull.rs`, and shared types
+- Unify upload/download progress bars to byte-level increments
+
 ---
 
 ## Phase 1.5: Storage hygiene
