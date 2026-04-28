@@ -9,6 +9,10 @@ services:
       - CLOUDSYNC_STAGING_DIR=/data/staging
       - CLOUDSYNC_DBNAME=/data/data.redb
       - CLOUDSYNC_HOST=0.0.0.0
+      # Static token auth: maps all requests to this tenant/user.
+      # Not needed when OIDC is configured (users get their own tenants).
+      - CLOUDSYNC_DEFAULT_TENANT_ID=${CLOUDSYNC_DEFAULT_TENANT_ID:-default-tenant}
+      - CLOUDSYNC_DEFAULT_USER_ID=${CLOUDSYNC_DEFAULT_USER_ID:-default-user}
       - RUST_LOG=cloudsync_server=info
     restart: unless-stopped
 
