@@ -11,8 +11,8 @@ use hmac::{Hmac, Mac};
 use rust_embed::RustEmbed;
 use sha2::Sha256;
 
-use crate::app::AppState;
-use crate::db;
+use crate::auth::UserContext;
+use crate::{app::AppState, db::TenantDb};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -186,7 +186,14 @@ pub async fn browse(
     }
 
     let prefix = query.prefix.unwrap_or_default();
-    let all_files = match db::list(&state.db) {
+    let db = TenantDb::new(
+        state.db.clone(),
+        UserContext {
+            tenant_id: state.default_tenant_id.clone(),
+            user_id: state.default_user_id.clone(),
+        },
+    );
+    let all_files = match db.list() {
         Ok(f) => f,
         Err(_) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to list files").into_response();
@@ -326,6 +333,8 @@ mod tests {
             is_deleted: false,
             created_at: chrono::Utc::now(),
             modified_at: chrono::Utc::now(),
+            user_id: "user".to_string(),
+            tenant_id: "tenant".to_string(),
         }
     }
 }

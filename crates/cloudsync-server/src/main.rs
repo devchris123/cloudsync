@@ -1,6 +1,7 @@
 use clap::Parser;
 
 mod cli;
+
 use cloudsync_server::app;
 use cloudsync_server::config;
 
@@ -15,7 +16,11 @@ async fn main() -> anyhow::Result<()> {
         staging_dir: args.staging_dir,
         token: args.token,
         dbname: args.dbname,
+        default_tenant_id: args.default_tenant_id,
+        default_user_id: args.default_user_id,
     };
+
+    // Start server
     let app = app::bootstrap_app(config).unwrap();
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", args.host, args.port))
         .await

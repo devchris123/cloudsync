@@ -35,6 +35,8 @@ async fn test_push_and_pull() {
         staging_dir: staging_dir_str,
         token: token.to_string(),
         dbname: dbname.to_string(),
+        default_tenant_id: "tenant".to_string(),
+        default_user_id: "user".to_string(),
     })
     .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -113,6 +115,8 @@ async fn test_pull_conflict() {
         staging_dir: staging_dir_str,
         token: token.to_string(),
         dbname: dbname.to_string(),
+        default_tenant_id: "tenant".to_string(),
+        default_user_id: "user".to_string(),
     })
     .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -13,6 +13,10 @@ pub struct Upload {
     pub chunks_received: Vec<u32>,
     pub created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
+    #[serde(default)]
+    pub tenant_id: String,
+    #[serde(default)]
+    pub user_id: String,
 }
 
 #[derive(Serialize, Deserialize)]

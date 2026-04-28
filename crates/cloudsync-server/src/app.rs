@@ -4,7 +4,7 @@ use axum::{
     Json, Router,
     body::{self},
     debug_handler,
-    extract::{self, DefaultBodyLimit, Multipart, Path, Request, State},
+    extract::{self, DefaultBodyLimit, FromRequestParts, Multipart, Path, Request, State},
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
@@ -21,7 +21,9 @@ use cloudsync_common::{
 };
 use redb::Database;
 
-use crate::{config::ServerConfig, db_upload};
+use crate::{
+    auth::UserContext, config::ServerConfig, db::TenantDb, db_upload::TenantUploadDb, migrations,
+};
 
 use super::db;
 use super::storage;
@@ -32,6 +34,8 @@ pub struct AppState {
     pub storage_dir: String,
     pub staging_dir: String,
     pub token: String,
+    pub default_tenant_id: String,
+    pub default_user_id: String,
 }
 
 struct AppError(anyhow::Error, StatusCode);
@@ -51,16 +55,35 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
     }
 }
 
+impl<S: Send + Sync> FromRequestParts<S> for UserContext {
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _: &S,
+    ) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<UserContext>()
+            .cloned()
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+    }
+}
+
 #[debug_handler]
-async fn list_files(State(state): State<AppState>) -> Result<Json<ListFilesResponse>, AppError> {
-    let db = state.db;
-    let files = db::list(&db)?;
+async fn list_files(
+    State(state): State<AppState>,
+    ctx: UserContext,
+) -> Result<Json<ListFilesResponse>, AppError> {
+    let db = TenantDb::new(state.db, ctx);
+    let files = db.list()?;
     Ok(Json(ListFilesResponse { files }))
 }
 
 #[debug_handler]
 async fn post_file(
     State(state): State<AppState>,
+    ctx: UserContext,
     mut multipart: Multipart,
 ) -> Result<Json<CreateFileResponse>, AppError> {
     let mut path = None;
@@ -77,8 +100,8 @@ async fn post_file(
 
     let content_hash: String = storage::write(&state.storage_dir, &content)?;
     tracing::info!("file stored: {} (hash: {})", path, content_hash);
-    let db = state.db;
-    let file_meta = db::put(&db, &path, content.len() as u64, &content_hash)?;
+    let db = TenantDb::new(state.db, ctx);
+    let file_meta = db.put(&path, content.len() as u64, &content_hash)?;
     tracing::info!("metadata saved: {} (version: {})", path, file_meta.version);
 
     Ok(Json(CreateFileResponse { file: file_meta }))
@@ -88,9 +111,10 @@ async fn post_file(
 async fn delete_file(
     State(state): State<AppState>,
     Path(path): Path<String>,
+    ctx: UserContext,
 ) -> Result<Json<DeleteFileResponse>, AppError> {
-    let db = state.db;
-    db::delete(&db, &path)?;
+    let db = TenantDb::new(state.db, ctx);
+    db.delete(&path)?;
     tracing::info!("file marked as deleted: {}", path);
     Ok(Json(DeleteFileResponse {}))
 }
@@ -99,10 +123,11 @@ async fn delete_file(
 async fn get_file(
     State(state): State<AppState>,
     Path(path): Path<String>,
+    ctx: UserContext,
     request: Request,
 ) -> Result<impl IntoResponse, AppError> {
-    let db: Arc<Database> = state.db;
-    let file_meta = db::get(&db, &path)?;
+    let db = TenantDb::new(state.db, ctx);
+    let file_meta = db.get(&path)?;
     let Some(file_meta) = file_meta else {
         tracing::warn!("metadata not found: {}", path);
         return Err(AppError(
@@ -123,9 +148,11 @@ async fn get_file(
 
 async fn create_upload(
     State(state): State<AppState>,
+    ctx: UserContext,
     extract::Json(body): extract::Json<InitUploadRequest>,
 ) -> Result<Json<InitUploadResponse>, AppError> {
-    let upload = db_upload::create(&state.db, body)?;
+    let db = TenantUploadDb::new(state.db, ctx);
+    let upload = db.create(body)?;
     let staging_dir = std::path::Path::new(&state.staging_dir).join(&upload.upload_id);
     std::fs::create_dir_all(staging_dir)?;
     Ok(Json(InitUploadResponse {
@@ -136,9 +163,11 @@ async fn create_upload(
 async fn replace_chunk(
     State(state): State<AppState>,
     extract::Path((upload_id, index)): Path<(String, u32)>,
+    ctx: UserContext,
     body: body::Bytes,
 ) -> Result<Json<ReplaceChunkResponse>, AppError> {
-    let upload = db_upload::get(&state.db, &upload_id)?;
+    let db = TenantUploadDb::new(state.db, ctx);
+    let upload = db.get(&upload_id)?;
     let Some(upload) = upload else {
         return Err(AppError(
             anyhow::anyhow!("upload not found"),
@@ -154,15 +183,17 @@ async fn replace_chunk(
     let staging_dir = std::path::Path::new(&state.staging_dir).join(&upload_id);
     let chunk_path = staging_dir.join(index.to_string());
     std::fs::write(chunk_path, body)?;
-    db_upload::add_chunk(&state.db, upload_id.as_str(), index)?;
+    db.add_chunk(&upload_id, index)?;
     Ok(Json(ReplaceChunkResponse { chunk_index: index }))
 }
 
 async fn get_upload(
     State(state): State<AppState>,
     extract::Path(upload_id): Path<String>,
+    ctx: UserContext,
 ) -> Result<Json<GetUploadResponse>, AppError> {
-    let upload = db_upload::get(&state.db, &upload_id)?;
+    let db = TenantUploadDb::new(state.db, ctx);
+    let upload = db.get(&upload_id)?;
     let Some(upload) = upload else {
         return Err(AppError(
             anyhow::anyhow!("not found"),
@@ -175,8 +206,10 @@ async fn get_upload(
 async fn finalize_upload(
     State(state): State<AppState>,
     extract::Path(upload_id): Path<String>,
+    ctx: UserContext,
 ) -> Result<Json<FinalizeUploadResponse>, AppError> {
-    let upload = db_upload::get(&state.db, &upload_id)?;
+    let upload_db: TenantUploadDb = TenantUploadDb::new(state.db.clone(), ctx.clone());
+    let upload = upload_db.get(&upload_id)?;
     let Some(upload) = upload else {
         return Err(AppError(
             anyhow::anyhow!("not found"),
@@ -209,13 +242,9 @@ async fn finalize_upload(
             StatusCode::INTERNAL_SERVER_ERROR,
         ));
     }
-    let file = db::put(
-        &state.db,
-        &upload.path,
-        upload.total_size,
-        &upload.total_hash,
-    )?;
-    db_upload::delete(&state.db, &upload_id)?;
+    let db = TenantDb::new(state.db, ctx);
+    let file = db.put(&upload.path, upload.total_size, &upload.total_hash)?;
+    upload_db.delete(&upload_id)?;
     std::fs::remove_dir_all(staging_dir)?;
     Ok(Json(FinalizeUploadResponse { file }))
 }
@@ -227,9 +256,6 @@ async fn get_health() -> Result<Json<GetHealthResponse>, AppError> {
     }))
 }
 
-#[derive(Clone)]
-struct AuthGranted;
-
 async fn bearer_auth_layer(
     State(state): State<AppState>,
     mut request: Request,
@@ -239,7 +265,10 @@ async fn bearer_auth_layer(
         && auth_header.to_str().unwrap() == format!("Bearer {}", state.token)
     {
         tracing::trace!("bearer token valid");
-        request.extensions_mut().insert(AuthGranted);
+        request.extensions_mut().insert(UserContext {
+            tenant_id: state.default_tenant_id,
+            user_id: state.default_user_id,
+        });
     }
     next.run(request).await
 }
@@ -254,13 +283,16 @@ async fn cookie_auth_layer(
         && crate::ui::verify_session_cookie(cookie_str, &state.token)
     {
         tracing::trace!("session cookie valid");
-        request.extensions_mut().insert(AuthGranted);
+        request.extensions_mut().insert(UserContext {
+            tenant_id: state.default_tenant_id,
+            user_id: state.default_user_id,
+        });
     }
     next.run(request).await
 }
 
 async fn require_auth_layer(request: Request, next: Next) -> Result<Response, StatusCode> {
-    if request.extensions().get::<AuthGranted>().is_some() {
+    if request.extensions().get::<UserContext>().is_some() {
         tracing::trace!("access granted");
         Ok(next.run(request).await)
     } else {
@@ -319,12 +351,18 @@ pub fn create_app(state: AppState) -> Router {
 
 pub fn bootstrap_app(config: ServerConfig) -> anyhow::Result<Router> {
     let db = db::open_db(&config.dbname)?;
+
+    // Run migrations
+    migrations::run_migrations(&db, &config.default_tenant_id, &config.default_user_id)?;
+
     let db = Arc::new(db);
     let state = AppState {
         db,
         storage_dir: config.storage_dir,
         staging_dir: config.staging_dir,
         token: config.token,
+        default_tenant_id: config.default_tenant_id,
+        default_user_id: config.default_user_id,
     };
     let app = create_app(state);
     Ok(app)
