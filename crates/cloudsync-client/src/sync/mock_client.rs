@@ -94,6 +94,8 @@ impl SyncApi for MockClient {
                 is_deleted: false,
                 created_at: chrono::Utc::now(),
                 modified_at: chrono::Utc::now(),
+                tenant_id: "tenant".to_string(),
+                user_id: "user".to_string(),
             },
         })
     }
@@ -149,6 +151,8 @@ impl SyncApi for MockClient {
                 chunks_received: (*self.get_upload_chunks_received.borrow()).clone(),
                 created_at: Utc::now(),
                 modified_at: Utc::now(),
+                tenant_id: "tenant".to_string(),
+                user_id: "user".to_string(),
             },
         })
     }
@@ -164,6 +168,8 @@ impl SyncApi for MockClient {
                 is_deleted: false,
                 created_at: Utc::now(),
                 modified_at: Utc::now(),
+                tenant_id: "tenant".to_string(),
+                user_id: "user".to_string(),
             },
         })
     }

@@ -283,6 +283,8 @@ mod tests {
             is_deleted: false,
             created_at: chrono::Utc::now(),
             modified_at: chrono::Utc::now(),
+            tenant_id: "tenant".to_string(),
+            user_id: "user".to_string(),
         }
     }
 
