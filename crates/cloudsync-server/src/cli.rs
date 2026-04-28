@@ -22,8 +22,16 @@ pub struct Args {
     pub staging_dir: String,
     #[arg(long, env = "CLOUDSYNC_DBNAME", default_value = "data.redb")]
     pub dbname: String,
-    #[arg(long, env = "CLOUDSYNC_DEFAULT_TENANT_ID", default_value = "tenant")]
+    #[arg(
+        long,
+        env = "CLOUDSYNC_DEFAULT_TENANT_ID",
+        default_value = "default-tenant"
+    )]
     pub default_tenant_id: String,
-    #[arg(long, env = "CLOUDSYNC_DEFAULT_USER_ID", default_value = "user")]
+    #[arg(
+        long,
+        env = "CLOUDSYNC_DEFAULT_USER_ID",
+        default_value = "default-user"
+    )]
     pub default_user_id: String,
 }
