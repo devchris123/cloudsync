@@ -5,4 +5,5 @@ pub struct ServerConfig {
     pub dbname: String,
     pub default_tenant_id: String,
     pub default_user_id: String,
+    pub oidc_issuer: Option<String>,
 }

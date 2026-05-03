@@ -25,6 +25,7 @@ async fn test_range_download() {
         dbname: dbname.to_string(),
         default_tenant_id: "tenant".to_string(),
         default_user_id: "user".to_string(),
+        oidc_issuer: None,
     })
     .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -79,6 +80,7 @@ async fn test_chunked_upload() {
         dbname: dbname.to_string(),
         default_tenant_id: "tenant".to_string(),
         default_user_id: "user".to_string(),
+        oidc_issuer: None,
     })
     .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
