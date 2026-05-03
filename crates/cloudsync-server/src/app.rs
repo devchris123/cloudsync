@@ -5,7 +5,7 @@ use axum::{
     body::{self},
     debug_handler,
     extract::{self, DefaultBodyLimit, FromRequestParts, Multipart, Path, Request, State},
-    http::StatusCode,
+    http::{HeaderValue, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
@@ -22,7 +22,12 @@ use cloudsync_common::{
 use redb::Database;
 
 use crate::{
-    auth::UserContext, config::ServerConfig, db::TenantDb, db_upload::TenantUploadDb, migrations,
+    auth::UserContext,
+    config::ServerConfig,
+    db::TenantDb,
+    db_upload::TenantUploadDb,
+    migrations,
+    oidc::{Claims, OidcValidator},
 };
 
 use super::db;
@@ -36,6 +41,7 @@ pub struct AppState {
     pub token: String,
     pub default_tenant_id: String,
     pub default_user_id: String,
+    pub oidc: Option<Arc<OidcValidator>>,
 }
 
 struct AppError(anyhow::Error, StatusCode);
@@ -261,16 +267,43 @@ async fn bearer_auth_layer(
     mut request: Request,
     next: Next,
 ) -> Response {
-    if let Some(auth_header) = request.headers().get("Authorization")
-        && auth_header.to_str().unwrap() == format!("Bearer {}", state.token)
-    {
-        tracing::trace!("bearer token valid");
-        request.extensions_mut().insert(UserContext {
-            tenant_id: state.default_tenant_id,
-            user_id: state.default_user_id,
-        });
+    if let Some(auth_header) = request.headers().get("Authorization") {
+        let claims = if let Some(oidc) = state.oidc {
+            get_claims(auth_header, &oidc).await
+        } else {
+            tracing::debug!("oidc not configured (OIDC)");
+            Ok(None)
+        };
+        if let Err(err) = &claims {
+            tracing::error!("error validating token: {} (OIDC)", err);
+        }
+        if let Ok(Some(claims)) = claims {
+            // tenant_id = sub for now; extend with custom claims for shared tenants later
+            request.extensions_mut().insert(UserContext {
+                tenant_id: claims.sub.clone(),
+                user_id: claims.sub,
+            });
+        } else if auth_header.to_str().unwrap_or("") == format!("Bearer {}", state.token) {
+            tracing::trace!("bearer token valid (Servertoken)");
+            request.extensions_mut().insert(UserContext {
+                tenant_id: state.default_tenant_id,
+                user_id: state.default_user_id,
+            });
+        }
     }
     next.run(request).await
+}
+
+async fn get_claims(
+    auth_header: &HeaderValue,
+    oidc: &OidcValidator,
+) -> anyhow::Result<Option<Claims>> {
+    let jwt = auth_header.to_str()?.strip_prefix("Bearer ");
+    if let Some(jwt) = jwt {
+        let res = oidc.validate(jwt.to_string()).await?;
+        return Ok(Some(res));
+    }
+    Ok(None)
 }
 
 async fn cookie_auth_layer(
@@ -297,7 +330,7 @@ async fn require_auth_layer(request: Request, next: Next) -> Result<Response, St
         Ok(next.run(request).await)
     } else {
         tracing::warn!("access denied: no valid authorization");
-        Err(StatusCode::FORBIDDEN)
+        Err(StatusCode::UNAUTHORIZED)
     }
 }
 
@@ -363,6 +396,9 @@ pub fn bootstrap_app(config: ServerConfig) -> anyhow::Result<Router> {
         token: config.token,
         default_tenant_id: config.default_tenant_id,
         default_user_id: config.default_user_id,
+        oidc: config
+            .oidc_issuer
+            .map(|iss| Arc::new(OidcValidator { issuer: iss })),
     };
     let app = create_app(state);
     Ok(app)
