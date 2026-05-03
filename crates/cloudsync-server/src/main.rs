@@ -18,6 +18,7 @@ async fn main() -> anyhow::Result<()> {
         dbname: args.dbname,
         default_tenant_id: args.default_tenant_id,
         default_user_id: args.default_user_id,
+        oidc_issuer: args.oidc_issuer,
     };
 
     // Start server
