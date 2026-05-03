@@ -34,4 +34,7 @@ pub struct Args {
         default_value = "default-user"
     )]
     pub default_user_id: String,
+
+    #[arg(long, env = "CLOUDSYNC_OIDC_ISSUER")]
+    pub oidc_issuer: Option<String>,
 }
