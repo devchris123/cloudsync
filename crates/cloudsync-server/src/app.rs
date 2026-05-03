@@ -398,7 +398,7 @@ pub fn bootstrap_app(config: ServerConfig) -> anyhow::Result<Router> {
         default_user_id: config.default_user_id,
         oidc: config
             .oidc_issuer
-            .map(|iss| Arc::new(OidcValidator { issuer: iss })),
+            .map(|iss| Arc::new(OidcValidator::new(iss, "".to_string()))),
     };
     let app = create_app(state);
     Ok(app)

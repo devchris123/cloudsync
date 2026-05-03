@@ -31,4 +31,7 @@ mime_guess = "2"
 
 [dev-dependencies]
 tempfile = "3"
+base64 = { version = "0.22" }
+rsa = "0.9"
+p256 = "0.13"
 reqwest = { workspace = true }
