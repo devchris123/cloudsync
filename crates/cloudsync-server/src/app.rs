@@ -396,9 +396,13 @@ pub fn bootstrap_app(config: ServerConfig) -> anyhow::Result<Router> {
         token: config.token,
         default_tenant_id: config.default_tenant_id,
         default_user_id: config.default_user_id,
-        oidc: config
-            .oidc_issuer
-            .map(|iss| Arc::new(OidcValidator::new(iss, "".to_string()))),
+        oidc: config.oidc_config.map(|oidc| {
+            Arc::new(OidcValidator::new(
+                oidc.issuer,
+                oidc.discovery_url,
+                oidc.audience,
+            ))
+        }),
     };
     let app = create_app(state);
     Ok(app)

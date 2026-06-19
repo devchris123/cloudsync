@@ -19,13 +19,15 @@ async fn test_range_download() {
         .unwrap()
         .to_string();
     let server = cloudsync_server::app::bootstrap_app(ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
         storage_dir: storage_dir_str,
         staging_dir: staging_dir.to_str().unwrap().to_string(),
         token: token.to_string(),
         dbname: dbname.to_string(),
         default_tenant_id: "tenant".to_string(),
         default_user_id: "user".to_string(),
-        oidc_issuer: None,
+        oidc_config: None,
     })
     .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -74,13 +76,15 @@ async fn test_chunked_upload() {
         .unwrap()
         .to_string();
     let server = cloudsync_server::app::bootstrap_app(ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
         storage_dir: storage_dir_str,
         staging_dir: staging_dir.to_str().unwrap().to_string(),
         token: token.to_string(),
         dbname: dbname.to_string(),
         default_tenant_id: "tenant".to_string(),
         default_user_id: "user".to_string(),
-        oidc_issuer: None,
+        oidc_config: None,
     })
     .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

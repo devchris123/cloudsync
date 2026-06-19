@@ -35,6 +35,25 @@ pub struct Args {
     )]
     pub default_user_id: String,
 
-    #[arg(long, env = "CLOUDSYNC_OIDC_ISSUER")]
+    #[arg(
+        long,
+        env = "CLOUDSYNC_OIDC_ISSUER",
+        help = "Expected issuer URL for JWT validation"
+    )]
     pub oidc_issuer: Option<String>,
+
+    #[arg(
+        long,
+        env = "CLOUDSYNC_OIDC_DISCOVERY_URL",
+        help = "Internal URL to fetch OIDC discovery document (defaults to issuer URL if not set)"
+    )]
+    pub oidc_discovery_url: Option<String>,
+
+    #[arg(
+        long,
+        env = "CLOUDSYNC_OIDC_AUDIENCE",
+        help = "OIDC client ID used to validate the audience claim",
+        default_value = "cloudsync"
+    )]
+    pub oidc_audience: Option<String>,
 }
