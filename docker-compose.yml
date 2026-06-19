@@ -26,3 +26,42 @@ services:
       - ${CLOUDSYNC_CADDY_MOUNT_DIR}/config:/config
       - ${CLOUDSYNC_CADDYFILE_DIR}:/etc/caddy
     restart: unless-stopped
+
+  # --- Observability stack ---
+  # Logs from every container on this host flow through Promtail → Loki,
+  # browseable via Grafana at monitoring.devchris.dev.
+
+  loki:
+    image: grafana/loki:3.6.11@sha256:44148ad243c07957113baea950ee5ba9b0c8eff8d7e38ff3cc1c0af705790945
+    command: -config.file=/etc/loki/loki-config.yml
+    volumes:
+      - ${CLOUDSYNC_OBSERVABILITY_DIR}/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - ${CLOUDSYNC_LOKI_MOUNT_DIR}:/loki
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:3.6.11@sha256:a761cb834cfaeee29745440d4884d6748f0a08d8f68928db1d707018c1dcfbe9
+    command: -config.file=/etc/promtail/promtail-config.yml
+    volumes:
+      - ${CLOUDSYNC_OBSERVABILITY_DIR}/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.0.2@sha256:5dad0df181cb644a14e13617b913b261a54f7d4fd4510721dba420929f35bea2
+    volumes:
+      - ${CLOUDSYNC_GRAFANA_MOUNT_DIR}:/var/lib/grafana
+      - ${CLOUDSYNC_OBSERVABILITY_DIR}/grafana/provisioning:/etc/grafana/provisioning:ro
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${CLOUDSYNC_GRAFANA_ADMIN_PASSWORD}
+      - GF_SERVER_ROOT_URL=https://monitoring.devchris.dev
+      # Behind Caddy, so trust the X-Forwarded-* headers it sets.
+      - GF_SERVER_ENFORCE_DOMAIN=false
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+    depends_on:
+      - loki
+    restart: unless-stopped

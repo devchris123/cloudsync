@@ -1,0 +1,34 @@
+# Promtail config for CloudSync.
+# Auto-discovers all running containers via the Docker socket and ships
+# their stdout/stderr to Loki. No app-side instrumentation needed.
+# https://grafana.com/docs/loki/latest/send-data/promtail/configuration/
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: warn
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+    relabel_configs:
+      # Strip the leading slash off Docker container names.
+      - source_labels: ["__meta_docker_container_name"]
+        regex: "/(.*)"
+        target_label: container
+      # Carry the compose service name through as `service` for nicer queries
+      # (e.g. {service="cloudsync"} works regardless of container suffix).
+      - source_labels: ["__meta_docker_container_label_com_docker_compose_service"]
+        target_label: service
+      # Static label so we can filter all VPS logs at once if we ever
+      # add a second host.
+      - target_label: host
+        replacement: cloudsync-vps
