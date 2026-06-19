@@ -64,6 +64,12 @@ rm /tmp/deploy_key /tmp/deploy_key.pub
 
 Set the `CLOUDSYNC_TOKEN` on the server (or store as a GitHub secret and pass during deploy).
 
+For the observability stack (see §7), also set `CLOUDSYNC_GRAFANA_ADMIN_PASSWORD` as a GitHub secret:
+
+```sh
+gh secret set CLOUDSYNC_GRAFANA_ADMIN_PASSWORD
+```
+
 ## 6. First Deploy
 
 The release workflow (`.github/workflows/release.yml`) handles:
@@ -72,3 +78,21 @@ The release workflow (`.github/workflows/release.yml`) handles:
 - SSHing into the server
 - Copying `docker-compose.yml` to the server
 - Running `docker compose up -d` with env vars for image tag, mount dir, and token
+
+## 7. Observability (Grafana + Loki + Promtail)
+
+Logs from every container on the host flow through Promtail into Loki and are
+browseable in Grafana at `https://monitoring.devchris.dev`.
+
+One-time DNS setup: add an A record for `monitoring.devchris.dev`
+pointing to the VPS IP. Caddy will provision the TLS cert automatically on
+first request.
+
+The deploy workflow creates `/mnt/volume-cloudsync/loki` and
+`/mnt/volume-cloudsync/grafana` with the right ownership (UID 10001 and 472
+respectively) — no manual setup needed beyond the DNS record and the
+`CLOUDSYNC_GRAFANA_ADMIN_PASSWORD` secret.
+
+First login: username `admin`, password from the secret. Loki is
+auto-provisioned as the default datasource; use the **Explore** tab and query
+`{container="cloudsync"}` to tail server logs.

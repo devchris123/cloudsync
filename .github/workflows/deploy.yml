@@ -17,17 +17,29 @@ jobs:
         env:
           DEPLOY_SSH_KEY: ${{ secrets.CLOUDSYNC_HETZNER_PRIVATE_KEY }}
           CLOUDSYNC_TOKEN: ${{ secrets.CLOUDSYNC_TOKEN }}
+          CLOUDSYNC_GRAFANA_ADMIN_PASSWORD: ${{ secrets.CLOUDSYNC_GRAFANA_ADMIN_PASSWORD }}
         run: |
           mkdir -p ~/.ssh
           echo "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           scp -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key docker-compose.yml root@46.224.102.7:~/docker-compose.yml
           scp -r -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key caddy root@46.224.102.7:~/caddy
+          scp -r -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key observability root@46.224.102.7:~/observability
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key root@46.224.102.7 << EOF
+            # Loki runs as UID 10001, Grafana as UID 472 — ensure their data
+            # dirs exist on the volume with correct ownership before first start.
+            mkdir -p /mnt/volume-cloudsync/loki /mnt/volume-cloudsync/grafana
+            chown -R 10001:10001 /mnt/volume-cloudsync/loki
+            chown -R 472:472 /mnt/volume-cloudsync/grafana
+
             CLOUDSYNC_DOCKER_TAG=${{ inputs.version }} \
             CLOUDSYNC_MOUNT_DIR=/mnt/volume-cloudsync/cloudsync \
             CLOUDSYNC_TOKEN=$CLOUDSYNC_TOKEN \
             CLOUDSYNC_CADDY_MOUNT_DIR=/mnt/volume-cloudsync/caddy \
             CLOUDSYNC_CADDYFILE_DIR=./caddy \
+            CLOUDSYNC_OBSERVABILITY_DIR=./observability \
+            CLOUDSYNC_LOKI_MOUNT_DIR=/mnt/volume-cloudsync/loki \
+            CLOUDSYNC_GRAFANA_MOUNT_DIR=/mnt/volume-cloudsync/grafana \
+            CLOUDSYNC_GRAFANA_ADMIN_PASSWORD=$CLOUDSYNC_GRAFANA_ADMIN_PASSWORD \
             docker compose -f ~/docker-compose.yml up -d
           EOF
