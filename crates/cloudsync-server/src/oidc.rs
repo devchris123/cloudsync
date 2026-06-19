@@ -6,11 +6,18 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::sync::RwLock;
 
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum Audience {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,
     pub iss: String,
-    pub aud: String,
+    pub aud: Audience,
     pub email: String,
     pub exp: usize,
 }
@@ -64,6 +71,7 @@ impl From<jsonwebtoken::errors::Error> for ValidationError {
 #[derive(Clone)]
 pub struct OidcValidator {
     pub issuer: String,
+    pub discovery_url: String,
     pub audience: String,
     pub client: Client,
     well_known_cache: Arc<RwLock<Option<(OidcDiscovery, std::time::Instant)>>>,
@@ -71,9 +79,10 @@ pub struct OidcValidator {
 }
 
 impl OidcValidator {
-    pub fn new(issuer: String, audience: String) -> Self {
+    pub fn new(issuer: String, discovery_url: String, audience: String) -> Self {
         OidcValidator {
-            issuer,
+            issuer: issuer.trim_end_matches('/').to_string(),
+            discovery_url: discovery_url.trim_end_matches('/').to_string(),
             audience,
             client: reqwest::Client::new(),
             well_known_cache: Arc::new(RwLock::new(None)),
@@ -120,7 +129,7 @@ impl OidcValidator {
             }
         }
         let well_known = ".well-known/openid-configuration";
-        let well_known = format!("{}/{well_known}", self.issuer);
+        let well_known = format!("{}/{well_known}", self.discovery_url);
         let response = self.client.get(well_known).send().await?;
         let bytes = response.bytes().await?;
         let oidc = serde_json::from_slice::<OidcDiscovery>(&bytes)?;
@@ -198,7 +207,7 @@ impl OidcValidator {
 
 #[cfg(test)]
 mod test {
-    use crate::oidc::{Claims, Jwk, Jwks, OidcValidator};
+    use crate::oidc::{Audience, Claims, Jwk, Jwks, OidcValidator};
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -222,7 +231,7 @@ mod test {
         // Assert
         assert_eq!(res.sub, "user123");
         assert_eq!(res.iss, "issuer");
-        assert_eq!(res.aud, "audience");
+        assert_eq!(res.aud, Audience::Single("audience".to_string()));
         assert_eq!(res.email, "test@example.com");
     }
 
@@ -243,7 +252,7 @@ mod test {
         // Assert
         assert_eq!(res.sub, "user123");
         assert_eq!(res.iss, "issuer");
-        assert_eq!(res.aud, "audience");
+        assert_eq!(res.aud, Audience::Single("audience".to_string()));
         assert_eq!(res.email, "test@example.com");
     }
 
@@ -266,7 +275,7 @@ mod test {
     #[test]
     fn test_token_invalid_audience() {
         let (mut claims, oidc, private_key, jwks) = create_test_setup();
-        claims.aud = "invalid-audience".into();
+        claims.aud = Audience::Single("invalid-audience".to_string());
 
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some("test-kid".to_string());
@@ -377,11 +386,15 @@ mod test {
             Claims {
                 iss: "issuer".into(),
                 sub: "user123".into(),
-                aud: "audience".into(),
+                aud: Audience::Single("audience".to_string()),
                 email: "test@example.com".into(),
                 exp: 9999999999,
             },
-            OidcValidator::new("issuer".to_string(), "audience".to_string()),
+            OidcValidator::new(
+                "issuer".to_string(),
+                "discovery_url".to_string(),
+                "audience".to_string(),
+            ),
             private_key,
             jwks,
         )

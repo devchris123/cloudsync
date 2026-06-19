@@ -69,6 +69,13 @@ Environment variables / CLI flags:
 - `CLOUDSYNC_STORAGE_DIR` (default: cloudsync/data/files)
 - `CLOUDSYNC_DBNAME` (default: data.redb)
 
+Optional OIDC (enables JWT auth alongside the static token):
+- `CLOUDSYNC_OIDC_ISSUER` — public issuer URL; matched against the JWT `iss` claim
+- `CLOUDSYNC_OIDC_DISCOVERY_URL` — URL used to fetch `.well-known/openid-configuration` and JWKS; defaults to `CLOUDSYNC_OIDC_ISSUER`. Useful when the IdP is reachable on a different internal hostname (e.g. inside Docker)
+- `CLOUDSYNC_OIDC_AUDIENCE` (default: `cloudsync`) — expected `aud` claim
+
+The OIDC variables are **integrity-critical**: anyone who controls them controls who can authenticate. In particular, `CLOUDSYNC_OIDC_DISCOVERY_URL` points the server at the JWKS it will trust to verify signatures — pointing it at an attacker-controlled host is equivalent to handing out signing keys. Set these via the deployment's secret/config store, not from a checked-in `.env`. Use `https://` for any discovery URL crossing an untrusted network; never disable TLS verification on it.
+
 ## API Endpoints
 
 All require `Authorization: Bearer <token>` except health:
