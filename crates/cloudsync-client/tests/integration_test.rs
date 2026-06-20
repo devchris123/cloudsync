@@ -31,6 +31,8 @@ async fn test_push_and_pull() {
         .unwrap()
         .to_string();
     let server = cloudsync_server::app::bootstrap_app(ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
         storage_dir: storage_dir_str,
         staging_dir: staging_dir_str,
         token: token.to_string(),
@@ -112,6 +114,8 @@ async fn test_pull_conflict() {
         .unwrap()
         .to_string();
     let server = cloudsync_server::app::bootstrap_app(ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
         storage_dir: storage_dir_str,
         staging_dir: staging_dir_str,
         token: token.to_string(),

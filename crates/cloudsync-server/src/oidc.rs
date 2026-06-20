@@ -36,11 +36,8 @@ struct Jwks {
 #[derive(Deserialize, Clone)]
 #[serde(tag = "kty")]
 enum Jwk {
-    RSA {
-        kid: String,
-        n: String,
-        e: String,
-    },
+    #[serde(rename = "RSA")]
+    Rsa { kid: String, n: String, e: String },
     EC {
         kid: String,
         x: String,
@@ -122,10 +119,10 @@ impl OidcValidator {
     async fn fetch_well_known(&self) -> anyhow::Result<OidcDiscovery> {
         {
             let cache = self.well_known_cache.read().await;
-            if let Some((oidc, fetched_at)) = &*cache {
-                if fetched_at.elapsed() < Duration::from_secs(3600) {
-                    return Ok(oidc.clone());
-                }
+            if let Some((oidc, fetched_at)) = &*cache
+                && fetched_at.elapsed() < Duration::from_secs(3600)
+            {
+                return Ok(oidc.clone());
             }
         }
         let well_known = ".well-known/openid-configuration";
@@ -146,10 +143,10 @@ impl OidcValidator {
     async fn fetch_jwks(&self, oidc: &OidcDiscovery) -> anyhow::Result<Jwks> {
         {
             let cache = self.jwks_cache.read().await;
-            if let Some((jwks, fetched_at)) = cache.as_ref() {
-                if fetched_at.elapsed() < Duration::from_secs(300) {
-                    return Ok(jwks.clone());
-                }
+            if let Some((jwks, fetched_at)) = cache.as_ref()
+                && fetched_at.elapsed() < Duration::from_secs(300)
+            {
+                return Ok(jwks.clone());
             }
         }
 
@@ -171,13 +168,13 @@ impl OidcValidator {
             .keys
             .iter()
             .find(|k| match k {
-                Jwk::RSA { kid: mykid, .. } => *mykid == kid,
+                Jwk::Rsa { kid: mykid, .. } => *mykid == kid,
                 Jwk::EC { kid: mykid, .. } => *mykid == kid,
             })
             .ok_or_else(|| ValidationError::UnknownKid(kid))?;
 
         let (alg, key) = match jwk {
-            Jwk::RSA { n, e, .. } => (
+            Jwk::Rsa { n, e, .. } => (
                 Algorithm::RS256,
                 jsonwebtoken::DecodingKey::from_rsa_components(n, e)?,
             ),
@@ -200,7 +197,7 @@ impl OidcValidator {
         validation.set_issuer(&[&self.issuer]);
         validation.set_audience(&[&self.audience]);
         validation.set_required_spec_claims(&["exp", "iss", "aud"]);
-        let claims = jsonwebtoken::decode::<Claims>(&jwt, &key, &validation)?;
+        let claims = jsonwebtoken::decode::<Claims>(jwt, &key, &validation)?;
         Ok(claims.claims)
     }
 }
@@ -436,7 +433,7 @@ Nc3GLyMxuf/cuSIU05L70Os=
         (
             private_key.into(),
             Jwks {
-                keys: vec![Jwk::RSA {
+                keys: vec![Jwk::Rsa {
                     kid: "test-kid".into(),
                     n: n.into(),
                     e: e.into(),
