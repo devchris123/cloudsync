@@ -35,7 +35,7 @@ services:
     # rotated passwords). Treat the JSON as bootstrap, not source of truth.
     command: ["start", "--import-realm"]
     volumes:
-      - ${CLOUDSYNC_KEYCLOAK_DATA_DIR}:/opt/keycloak/data
+      - ${CLOUDSYNC_KC_DATA_DIR}:/opt/keycloak/data
       - ./keycloak/realm-cloudsync.json:/opt/keycloak/data/import/realm-cloudsync.json:ro
     restart: unless-stopped
 

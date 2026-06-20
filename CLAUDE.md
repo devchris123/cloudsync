@@ -49,7 +49,9 @@ Rust toolchain pinned to **1.91.1** via `rust-toolchain.toml`.
 
 PR checks (`.github/workflows/ci.yml`): rustfmt, clippy with `--deny warnings`, tests. Docs/markdown changes skip CI.
 
-Release (`.github/workflows/release.yml`): on `v*` tags — GitHub release, Docker image to GHCR, deploy to Hetzner.
+Release (`.github/workflows/release.yml`): on `v*` tags — builds cross-platform client binaries + a server binary, creates a GitHub release with auto-generated notes, and pushes the server Docker image to GHCR (tagged with the version and `latest`).
+
+Deploy (`.github/workflows/deploy.yml`): manual `workflow_dispatch` trigger — SSHes to Hetzner, copies `docker-compose.yml` and config dirs, and runs `docker compose up -d` with the chosen image tag. The split is deliberate: tagging publishes artifacts; deploy chooses what's running. To roll back, trigger Deploy with an earlier version tag.
 
 ## Key Patterns
 

@@ -18,6 +18,8 @@ jobs:
           DEPLOY_SSH_KEY: ${{ secrets.CLOUDSYNC_HETZNER_PRIVATE_KEY }}
           CLOUDSYNC_TOKEN: ${{ secrets.CLOUDSYNC_TOKEN }}
           CLOUDSYNC_GRAFANA_ADMIN_PASSWORD: ${{ secrets.CLOUDSYNC_GRAFANA_ADMIN_PASSWORD }}
+          CLOUDSYNC_KC_ADMIN: ${{ secrets.CLOUDSYNC_KC_ADMIN }}
+          CLOUDSYNC_KC_ADMIN_PASSWORD: ${{ secrets.CLOUDSYNC_KC_ADMIN_PASSWORD }}
         run: |
           mkdir -p ~/.ssh
           echo "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
@@ -44,6 +46,9 @@ jobs:
             CLOUDSYNC_LOKI_MOUNT_DIR=/mnt/volume-cloudsync/loki \
             CLOUDSYNC_GRAFANA_MOUNT_DIR=/mnt/volume-cloudsync/grafana \
             CLOUDSYNC_GRAFANA_ADMIN_PASSWORD=$CLOUDSYNC_GRAFANA_ADMIN_PASSWORD \
+            CLOUDSYNC_KC_DATA_DIR=/mnt/volume-cloudsync/keycloak \
+            CLOUDSYNC_KC_ADMIN=$CLOUDSYNC_KC_ADMIN \
+            CLOUDSYNC_KC_ADMIN_PASSWORD=$CLOUDSYNC_KC_ADMIN_PASSWORD \
             docker compose -f ~/docker-compose.yml up -d
 
             # Compose only restarts a service when its spec changes; bind-mounted

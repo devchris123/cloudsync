@@ -38,7 +38,7 @@ mkdir -p /mnt/volume-cloudsync/{cloudsync,caddy,keycloak}
 | ---------- | ----------------------------- | -------------------------------------- |
 | `cloudsync/` | `CLOUDSYNC_MOUNT_DIR`         | cloudsync server: file storage + redb  |
 | `caddy/`     | `CLOUDSYNC_CADDY_MOUNT_DIR`   | caddy: Let's Encrypt certs, state      |
-| `keycloak/`  | `CLOUDSYNC_KEYCLOAK_DATA_DIR` | keycloak: H2 database, signing keys    |
+| `keycloak/`  | `CLOUDSYNC_KC_DATA_DIR`       | keycloak: H2 database, signing keys    |
 
 ### Permissions
 
@@ -92,14 +92,56 @@ For the observability stack (see §7), also set `CLOUDSYNC_GRAFANA_ADMIN_PASSWOR
 gh secret set CLOUDSYNC_GRAFANA_ADMIN_PASSWORD
 ```
 
-## 6. First Deploy
+### GitHub secrets used by `deploy.yml`
 
-The release workflow (`.github/workflows/release.yml`) handles:
+| Secret                             | What it's for                                      |
+| ---------------------------------- | -------------------------------------------------- |
+| `CLOUDSYNC_HETZNER_PRIVATE_KEY`    | SSH key for the deploy user on the VPS             |
+| `CLOUDSYNC_TOKEN`                  | Static bearer token for the API (fallback auth)    |
+| `CLOUDSYNC_GRAFANA_ADMIN_PASSWORD` | Grafana admin password                             |
+| `CLOUDSYNC_KC_ADMIN`               | Keycloak bootstrap admin username                  |
+| `CLOUDSYNC_KC_ADMIN_PASSWORD`      | Keycloak bootstrap admin password (rotate after 1st login) |
 
-- Building and pushing the Docker image to ghcr.io
-- SSHing into the server
-- Copying `docker-compose.yml` to the server
-- Running `docker compose up -d` with env vars for image tag, mount dir, and token
+## 6. Release and Deploy
+
+Two separate steps: tag a release to publish artifacts, then trigger a
+deploy to roll it out. Splitting them lets you publish without deploying,
+deploy any past tag (rollback), or re-deploy the same tag without re-tagging.
+
+### Release
+
+```sh
+git checkout main && git pull
+git tag -a v0.3.0 -m "Short summary of what's in this release"
+git push origin v0.3.0
+```
+
+The release workflow (`release.yml`) triggers on the tag push and:
+
+- Builds client binaries for linux x86_64/aarch64 and macOS intel/arm
+- Builds the server binary for linux x86_64
+- Creates a GitHub release with auto-generated notes
+- Pushes the server Docker image to `ghcr.io/devchris123/cloudsync-server`
+  with tags `:<version>` and `:latest`
+
+Takes ~10 minutes for all targets. Watch progress in the Actions tab.
+
+### Deploy
+
+After the release workflow finishes, trigger a deploy:
+
+```sh
+gh workflow run deploy.yml -f version=v0.3.0
+```
+
+Or via the GitHub UI: Actions → Deploy → Run workflow → enter the version.
+
+The deploy workflow (`deploy.yml`) SSHes to the VPS, copies the current
+repo's `docker-compose.yml` and config dirs (caddy, observability), and
+runs `docker compose up -d` with env vars pointing at the chosen image
+tag. The compose file shipped is the one at `HEAD` of `main` at deploy
+time, not the one at the tagged commit — keep that in mind if you ever
+need to deploy an old version against a new compose layout.
 
 ## 7. Observability (Grafana + Loki + Promtail)
 
