@@ -23,8 +23,11 @@ jobs:
           echo "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           scp -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key docker-compose.yml root@46.224.102.7:~/docker-compose.yml
-          scp -r -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key caddy root@46.224.102.7:~/caddy
-          scp -r -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key observability root@46.224.102.7:~/observability
+          # rsync (not scp -r) so config dirs are mirrored, not nested inside
+          # themselves on subsequent deploys. --delete drops files removed in
+          # the repo so stale configs can't outlive a deploy.
+          rsync -az --delete -e "ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key" caddy/ root@46.224.102.7:~/caddy/
+          rsync -az --delete -e "ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key" observability/ root@46.224.102.7:~/observability/
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key root@46.224.102.7 << EOF
             # Loki runs as UID 10001, Grafana as UID 472 — ensure their data
             # dirs exist on the volume with correct ownership before first start.
@@ -42,4 +45,12 @@ jobs:
             CLOUDSYNC_GRAFANA_MOUNT_DIR=/mnt/volume-cloudsync/grafana \
             CLOUDSYNC_GRAFANA_ADMIN_PASSWORD=$CLOUDSYNC_GRAFANA_ADMIN_PASSWORD \
             docker compose -f ~/docker-compose.yml up -d
+
+            # Compose only restarts a service when its spec changes; bind-mounted
+            # config files (Caddyfile, Loki/Promtail/Grafana configs) are invisible
+            # to that check. Force the consumers to re-read them. xargs -r skips
+            # the call entirely if a service isn't running, instead of erroring.
+            for svc in reverse-proxy loki promtail grafana; do
+              docker ps -q --filter "name=\$svc" | xargs -r docker restart
+            done
           EOF
