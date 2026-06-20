@@ -29,6 +29,7 @@ jobs:
           # themselves on subsequent deploys. --delete drops files removed in
           # the repo so stale configs can't outlive a deploy.
           rsync -az --delete -e "ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key" caddy/ root@46.224.102.7:~/caddy/
+          rsync -az --delete -e "ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key" keycloak/ root@46.224.102.7:~/keycloak/
           rsync -az --delete -e "ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key" observability/ root@46.224.102.7:~/observability/
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key root@46.224.102.7 << EOF
             # Loki runs as UID 10001, Grafana as UID 472 — ensure their data
