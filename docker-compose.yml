@@ -25,7 +25,11 @@ services:
     environment:
       - KEYCLOAK_ADMIN=$CLOUDSYNC_KC_ADMIN
       - KEYCLOAK_ADMIN_PASSWORD=$CLOUDSYNC_KC_ADMIN_PASSWORD
-      - KC_HOSTNAME=https://auth.devchris.dev
+      # KC_HOSTNAME takes a bare hostname, not a URL — passing a scheme makes
+      # Keycloak generate frontend URLs like https://https://auth..., which
+      # surfaces as an invalid CSP frame-src and breaks the SSO check iframe.
+      # Scheme/port are resolved from the X-Forwarded-* headers Caddy sets.
+      - KC_HOSTNAME=auth.devchris.dev
       - KC_PROXY_HEADERS=xforwarded
       - KC_HTTP_ENABLED=true
     ports:
