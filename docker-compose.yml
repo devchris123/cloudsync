@@ -13,7 +13,30 @@ services:
       # Not needed when OIDC is configured (users get their own tenants).
       - CLOUDSYNC_DEFAULT_TENANT_ID=${CLOUDSYNC_DEFAULT_TENANT_ID:-default-tenant}
       - CLOUDSYNC_DEFAULT_USER_ID=${CLOUDSYNC_DEFAULT_USER_ID:-default-user}
+      # OIDC config
+      - CLOUDSYNC_OIDC_ISSUER=https://auth.devchris.dev/realms/cloudsync
+      - CLOUDSYNC_OIDC_DISCOVERY_URL=http://keycloak:8080/realms/cloudsync
+      - CLOUDSYNC_OIDC_AUDIENCE=cloudsync
       - RUST_LOG=cloudsync_server=info
+    restart: unless-stopped
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0.3
+    environment:
+      - KEYCLOAK_ADMIN=$CLOUDSYNC_KC_ADMIN
+      - KEYCLOAK_ADMIN_PASSWORD=$CLOUDSYNC_KC_ADMIN_PASSWORD
+      - KC_HOSTNAME=https://auth.devchris.dev
+      - KC_PROXY_HEADERS=xforwarded
+      - KC_HTTP_ENABLED=true
+    ports:
+      - "8080:8080"
+    # --import-realm bootstraps the cloudsync realm from realm-cloudsync.json
+    # on first boot only; subsequent boots preserve in-place changes (users,
+    # rotated passwords). Treat the JSON as bootstrap, not source of truth.
+    command: ["start", "--import-realm"]
+    volumes:
+      - ${CLOUDSYNC_KEYCLOAK_DATA_DIR}:/opt/keycloak/data
+      - ./keycloak/realm-cloudsync.json:/opt/keycloak/data/import/realm-cloudsync.json:ro
     restart: unless-stopped
 
   reverse-proxy:
