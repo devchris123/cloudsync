@@ -5,3 +5,7 @@ cloudsync.devchris.dev {
 monitoring.devchris.dev {
 	reverse_proxy grafana:3000
 }
+
+auth.devchris.dev {
+    reverse_proxy keycloak:8080
+}

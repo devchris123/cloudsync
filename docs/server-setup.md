@@ -28,11 +28,33 @@ Verify: `ssh -o PubkeyAuthentication=no root@<server-ip>` should return `Permiss
 
 - Mount the Hetzner volume to `/mnt/volume-cloudsync`
 - Remove any duplicate mount points from `/etc/fstab`
-- Create the data directory:
+- Create one subdirectory per service that needs persistent state:
 
 ```sh
-mkdir -p /mnt/volume-cloudsync/cloudsync
+mkdir -p /mnt/volume-cloudsync/{cloudsync,caddy,keycloak}
 ```
+
+| Directory  | Maps to env var               | Backs                                  |
+| ---------- | ----------------------------- | -------------------------------------- |
+| `cloudsync/` | `CLOUDSYNC_MOUNT_DIR`         | cloudsync server: file storage + redb  |
+| `caddy/`     | `CLOUDSYNC_CADDY_MOUNT_DIR`   | caddy: Let's Encrypt certs, state      |
+| `keycloak/`  | `CLOUDSYNC_KEYCLOAK_DATA_DIR` | keycloak: H2 database, signing keys    |
+
+### Permissions
+
+Each container's process needs write access to its bind-mounted directory.
+Containers running as root inside the image (cloudsync, caddy) can write to
+`root:root 755` dirs, so they need no chown. Keycloak's official image runs
+as uid 1000 and will fail to start if it can't write to its data dir:
+
+```sh
+chown 1000:1000 /mnt/volume-cloudsync/keycloak
+```
+
+If we ever harden the cloudsync or caddy images to run as a non-root user
+(see roadmap), the same chown becomes required for those dirs too — pick a
+uid, declare it in the Dockerfile (or `user:` in compose), and `chown` the
+matching host dir.
 
 ## 4. Deploy Key for CI/CD
 
