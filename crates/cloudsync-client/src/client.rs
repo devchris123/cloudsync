@@ -22,7 +22,7 @@ pub struct SyncClient {
 
 impl SyncClient {
     pub fn new(server_url: &str, token: String) -> Self {
-        Self::with_source(server_url, TokenSource::Static(token))
+        Self::with_source(server_url, TokenSource::Static { token })
     }
 
     pub fn with_source(server_url: &str, source: TokenSource) -> Self {
