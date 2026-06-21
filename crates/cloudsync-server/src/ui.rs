@@ -28,6 +28,7 @@ struct StaticAssets;
 #[template(path = "login.html")]
 struct LoginTemplate {
     error: String,
+    oidc_enabled: bool,
 }
 
 pub struct Breadcrumb {
@@ -113,10 +114,12 @@ fn build_breadcrumbs(prefix: &str) -> Vec<Breadcrumb> {
 }
 
 fn has_session(headers: &axum::http::HeaderMap, token: &str) -> bool {
-    headers
-        .get(header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|cookie| verify_session_cookie(cookie, token))
+    let Some(cookie) = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    // Either auth path counts as "logged in" for the purposes of the login page redirect.
+    verify_session_cookie(cookie, token)
+        || crate::oidc_web::read_session_cookie(token, cookie).is_some()
 }
 
 // --- Handlers ---
@@ -124,6 +127,14 @@ fn has_session(headers: &axum::http::HeaderMap, token: &str) -> bool {
 #[derive(serde::Deserialize)]
 pub struct BrowseQuery {
     pub prefix: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct LoginPageQuery {
+    /// Set by `/auth/callback` when it bounces the user back after a failure.
+    /// Known values: `session_expired`, `idp_error`. Unknown values render
+    /// generically — we don't echo the raw value into the page.
+    pub err: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -139,12 +150,24 @@ pub async fn index(State(state): State<AppState>, headers: axum::http::HeaderMap
     }
 }
 
-pub async fn login_page(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+pub async fn login_page(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<LoginPageQuery>,
+) -> Response {
     if has_session(&headers, &state.token) {
         return Redirect::to("/browse").into_response();
     }
+    // Map the structured err code into a user-facing message. Never render
+    // the raw query param — it's untrusted and could carry HTML.
+    let error = match query.err.as_deref() {
+        Some("session_expired") => "Your login session expired. Please sign in again.".to_string(),
+        Some("idp_error") => "The identity provider rejected the login attempt.".to_string(),
+        Some(_) | None => String::new(),
+    };
     let template = LoginTemplate {
-        error: String::new(),
+        error,
+        oidc_enabled: state.oidc.is_some(),
     };
     Html(template.render().unwrap()).into_response()
 }
@@ -156,6 +179,7 @@ pub async fn login_submit(
     if form.token != state.token {
         let template = LoginTemplate {
             error: "Invalid token.".to_string(),
+            oidc_enabled: state.oidc.is_some(),
         };
         return (StatusCode::FORBIDDEN, Html(template.render().unwrap())).into_response();
     }
@@ -167,32 +191,81 @@ pub async fn login_submit(
     response
 }
 
-pub async fn logout() -> Response {
-    let cookie = clear_session_cookie();
-    let mut response = Redirect::to("/login").into_response();
+pub async fn logout(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    let cookie_header = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let has_oidc_session =
+        crate::oidc_web::read_session_cookie(&state.token, cookie_header).is_some();
+
+    // For OIDC sessions: clear the cookie and ALSO redirect to Keycloak's
+    // end_session_endpoint so the IdP-side SSO is killed too. Without this,
+    // hitting /login again would silently SSO the user straight back in,
+    // which is wrong for shared-device cases.
+    let base_url = crate::oidc_web::derive_base_url(&headers);
+    let secure = base_url.starts_with("https://");
+
+    let mut response = if has_oidc_session
+        && let Some(oidc) = &state.oidc
+        && let Some(oidc_client) = &state.oidc_client
+        && let Ok(discovery) = oidc.discovery().await
+        && let Some(end_session) = discovery.end_session_endpoint.as_ref()
+    {
+        let post_logout = format!("{base_url}/login");
+        let url = format!(
+            "{end_session}?post_logout_redirect_uri={}&client_id={}",
+            url_encode(&post_logout),
+            url_encode(&oidc_client.client_id),
+        );
+        Redirect::to(&url).into_response()
+    } else {
+        Redirect::to("/login").into_response()
+    };
+
+    // Always clear BOTH cookie names — a session might exist in either form
+    // and we want logout to be unconditional.
+    let h = response.headers_mut();
+    h.append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&clear_session_cookie()).unwrap(),
+    );
+    h.append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&crate::oidc_web::clear_session_cookie(secure)).unwrap(),
+    );
     response
-        .headers_mut()
-        .insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
-    response
+}
+
+/// Minimal RFC3986 percent-encoder for query values. Duplicates oidc_web's
+/// helper but keeping a separate copy here avoids exporting one across modules
+/// for two trivial call sites.
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 pub async fn browse(
     State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
+    ctx: Option<axum::extract::Extension<UserContext>>,
     Query(query): Query<BrowseQuery>,
 ) -> Response {
-    if !has_session(&headers, &state.token) {
+    // `cookie_auth_layer` attaches a `UserContext` when a valid session
+    // (OIDC or static) is present. No extension → not logged in.
+    let Some(axum::extract::Extension(ctx)) = ctx else {
         return Redirect::to("/login").into_response();
-    }
+    };
 
     let prefix = query.prefix.unwrap_or_default();
-    let db = TenantDb::new(
-        state.db.clone(),
-        UserContext {
-            tenant_id: state.default_tenant_id.clone(),
-            user_id: state.default_user_id.clone(),
-        },
-    );
+    let db = TenantDb::new(state.db.clone(), ctx);
     let all_files = match db.list() {
         Ok(f) => f,
         Err(_) => {

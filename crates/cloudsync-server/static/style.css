@@ -190,6 +190,52 @@ main {
     margin-bottom: 1rem;
 }
 
+.login-card .sso-button {
+    display: block;
+    width: 100%;
+    padding: 0.55rem;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius);
+    font-size: 0.95rem;
+    font-weight: 600;
+    text-align: center;
+    text-decoration: none;
+    cursor: pointer;
+    margin-bottom: 1rem;
+}
+
+.login-card .sso-button:hover {
+    background: var(--accent-hover);
+}
+
+.login-card .divider {
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.8rem;
+    margin: 1rem 0;
+    position: relative;
+}
+
+.login-card .divider::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: var(--border);
+    z-index: 0;
+}
+
+.login-card .divider span {
+    background: var(--surface);
+    padding: 0 0.5rem;
+    position: relative;
+    z-index: 1;
+}
+
 /* Empty state */
 .empty {
     text-align: center;
