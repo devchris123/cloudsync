@@ -242,3 +242,50 @@ main {
     padding: 3rem 1rem;
     color: var(--muted);
 }
+
+/* Search toolbar */
+.toolbar {
+    margin-bottom: 0.6rem;
+}
+
+.toolbar input[type="search"] {
+    width: 100%;
+    padding: 0.45rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 0.95rem;
+    background: var(--surface);
+}
+
+.toolbar input[type="search"]:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+    border-color: var(--accent);
+}
+
+/* Delete button */
+.file-table td.actions {
+    text-align: right;
+    width: 5rem;
+}
+
+.btn-delete {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.2rem 0.6rem;
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 0.8rem;
+}
+
+.btn-delete:hover {
+    border-color: #dc2626;
+    color: #dc2626;
+}
+
+.truncation-notice td {
+    text-align: center;
+    color: var(--muted);
+    font-style: italic;
+}

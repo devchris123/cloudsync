@@ -124,11 +124,17 @@ async fn delete_file(
     State(state): State<AppState>,
     Path(path): Path<String>,
     ctx: UserContext,
-) -> Result<Json<DeleteFileResponse>, AppError> {
+    headers: axum::http::HeaderMap,
+) -> Result<Response, AppError> {
     let db = TenantDb::new(state.db, ctx);
     db.delete(&path)?;
     tracing::info!("file marked as deleted: {}", path);
-    Ok(Json(DeleteFileResponse {}))
+    // HTMX swaps `outerHTML` of the row; an empty 200 makes the row disappear.
+    // Non-HTMX (CLI / API) callers keep getting the structured JSON response.
+    if headers.get("HX-Request").is_some() {
+        return Ok(StatusCode::OK.into_response());
+    }
+    Ok(Json(DeleteFileResponse {}).into_response())
 }
 
 #[debug_handler]
@@ -417,6 +423,15 @@ pub fn create_app(state: AppState) -> Router {
         ))
         .layer(DefaultBodyLimit::max(5 * 1024 * 1024)); // 4MB + overhead
 
+    // Cookie-auth-only HTML fragment routes for HTMX swaps.
+    let partials_router = Router::<AppState>::new()
+        .route("/partials/files", get(crate::ui::partial_files))
+        .route_layer(axum::middleware::from_fn(require_auth_layer))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            cookie_auth_layer,
+        ));
+
     // Web UI routes (auth handled per-handler via cookie check)
     let ui_router = Router::<AppState>::new()
         .route("/", get(crate::ui::index))
@@ -442,6 +457,7 @@ pub fn create_app(state: AppState) -> Router {
         .route("/api/v1/health", get(get_health))
         .route("/api/v1/auth/info", get(get_auth_info))
         .merge(auth_router)
+        .merge(partials_router)
         .merge(ui_router)
         .merge(browse_router)
         .layer(TraceLayer::new_for_http())

@@ -51,7 +51,24 @@ struct BrowserTemplate {
     breadcrumbs: Vec<Breadcrumb>,
     directories: Vec<String>,
     files: Vec<FileEntry>,
+    truncated: bool,
+    row_cap: usize,
 }
+
+#[derive(Template)]
+#[template(path = "file_rows.html")]
+struct FileRowsTemplate {
+    prefix: String,
+    directories: Vec<String>,
+    files: Vec<FileEntry>,
+    truncated: bool,
+    row_cap: usize,
+}
+
+/// Hard cap on rows returned from `/browse` and `/partials/files`. Mostly a
+/// guard against rendering 50,000 `<tr>` elements at once; if a user hits it
+/// the search box becomes the way to find what they want.
+const ROW_CAP: usize = 500;
 
 // --- Cookie auth helpers ---
 
@@ -273,15 +290,77 @@ pub async fn browse(
         }
     };
 
-    let (files, directories) = files_and_dirs(all_files, &prefix);
+    let (mut files, directories) = files_and_dirs(all_files, &prefix);
+    let truncated = files.len() > ROW_CAP;
+    if truncated {
+        files.truncate(ROW_CAP);
+    }
 
     let template = BrowserTemplate {
         breadcrumbs: build_breadcrumbs(&prefix),
         prefix,
         directories: directories.into_iter().collect(),
         files,
+        truncated,
+        row_cap: ROW_CAP,
     };
 
+    Html(template.render().unwrap()).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct PartialFilesQuery {
+    pub prefix: Option<String>,
+    pub q: Option<String>,
+}
+
+/// Returns the `<tbody>` fragment for the file table, filtered by `q` (case-
+/// insensitive substring on the file or directory name).
+///
+/// Cookie auth: this route is mounted behind `cookie_auth_layer +
+/// require_auth_layer` in the router, so a missing session yields 401 before
+/// the handler runs. The `UserContext` extension attached by the layer carries
+/// the identity we scope the DB query to.
+pub async fn partial_files(
+    State(state): State<AppState>,
+    axum::extract::Extension(ctx): axum::extract::Extension<UserContext>,
+    Query(query): Query<PartialFilesQuery>,
+) -> Response {
+    let prefix = query.prefix.unwrap_or_default();
+    let needle = query.q.unwrap_or_default().to_lowercase();
+
+    let db = TenantDb::new(state.db.clone(), ctx);
+    let all_files = match db.list() {
+        Ok(f) => f,
+        Err(_) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to list files").into_response();
+        }
+    };
+
+    let (mut files, directories) = files_and_dirs(all_files, &prefix);
+    if !needle.is_empty() {
+        files.retain(|f| f.name.to_lowercase().contains(&needle));
+    }
+    let directories: Vec<String> = if needle.is_empty() {
+        directories.into_iter().collect()
+    } else {
+        directories
+            .into_iter()
+            .filter(|d| d.to_lowercase().contains(&needle))
+            .collect()
+    };
+    let truncated = files.len() > ROW_CAP;
+    if truncated {
+        files.truncate(ROW_CAP);
+    }
+
+    let template = FileRowsTemplate {
+        prefix,
+        directories,
+        files,
+        truncated,
+        row_cap: ROW_CAP,
+    };
     Html(template.render().unwrap()).into_response()
 }
 

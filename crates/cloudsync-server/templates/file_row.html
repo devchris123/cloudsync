@@ -1,0 +1,12 @@
+<tr>
+    <td><a href="/api/v1/files/{{ file.path }}">{{ file.name }}</a></td>
+    <td class="size">{{ file.display_size }}</td>
+    <td class="date">{{ file.display_date }}</td>
+    <td class="actions">
+        <button class="btn-delete"
+                hx-delete="/api/v1/files/{{ file.path }}"
+                hx-confirm="Delete {{ file.name }}?"
+                hx-target="closest tr"
+                hx-swap="outerHTML">Delete</button>
+    </td>
+</tr>
