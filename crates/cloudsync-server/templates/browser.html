@@ -2,6 +2,10 @@
 
 {% block title %}Browse — CloudSync{% endblock %}
 
+{% block head %}
+<script src="/static/upload.js" defer></script>
+{% endblock %}
+
 {% block body %}
 <nav>
     <span class="brand">CloudSync</span>
@@ -17,6 +21,14 @@
         <a href="/browse?prefix={{ crumb.prefix }}">{{ crumb.name }}</a>
         {% endfor %}
     </div>
+
+    <div id="dropzone"
+         data-prefix="{{ prefix }}">
+        <p>Drop files here to upload</p>
+        <input type="file" id="filepicker" multiple hidden>
+        <button type="button" id="pickbutton">or pick files</button>
+    </div>
+    <ul id="uploads"></ul>
 
     <div class="toolbar">
         <input type="search"
