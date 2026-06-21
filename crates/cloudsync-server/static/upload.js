@@ -83,8 +83,15 @@
     let blake3Promise = null;
     function getBlake3() {
         if (!blake3Promise) {
-            // hashWasm is the UMD global exported by /static/hash-wasm.min.js
-            blake3Promise = window.hashWasm.createBLAKE3();
+            // The hash-wasm UMD bundle exposes the package as the lowercase
+            // global `hashwasm` (see the UMD header in hash-wasm.min.js).
+            const lib = window.hashwasm;
+            if (!lib || typeof lib.createBLAKE3 !== 'function') {
+                return Promise.reject(
+                    new Error('hash-wasm not loaded (window.hashwasm.createBLAKE3 missing)'),
+                );
+            }
+            blake3Promise = lib.createBLAKE3();
         }
         return blake3Promise;
     }
