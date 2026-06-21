@@ -14,6 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod device;
 pub mod loopback;
 
 /// Margin before expiry within which we proactively refresh. Picked to be
@@ -123,6 +124,11 @@ impl OidcSession {
 pub(crate) struct OidcDiscovery {
     pub authorization_endpoint: String,
     pub token_endpoint: String,
+    /// Optional: only present if the IdP advertises the device-authorization
+    /// grant. Keycloak gates this behind a per-client attribute; the device
+    /// flow surfaces a clear "enable it on the client" error when absent.
+    #[serde(default)]
+    pub device_authorization_endpoint: Option<String>,
 }
 
 pub(crate) async fn fetch_discovery(issuer: &str) -> anyhow::Result<OidcDiscovery> {
@@ -146,6 +152,23 @@ pub(crate) struct TokenResponse {
     pub refresh_token: Option<String>,
     pub expires_in: Option<u64>,
     pub id_token: Option<String>,
+}
+
+/// Extract `email` (falling back to `preferred_username`) from an *unverified*
+/// JWT — used for display only. The server validates every access token on
+/// every API call, so we don't redo signature verification on the client side.
+pub(crate) fn extract_email_from_id_token(id_token: &str) -> Option<String> {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let mut parts = id_token.split('.');
+    let _header = parts.next()?;
+    let payload_b64 = parts.next()?;
+    let payload = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+    v.get("email")
+        .or_else(|| v.get("preferred_username"))
+        .and_then(|s| s.as_str())
+        .map(str::to_string)
 }
 
 #[cfg(test)]
