@@ -1,0 +1,16 @@
+{% for dir in directories %}
+<tr>
+    <td><span class="icon">&#128193;</span><a href="/browse?prefix={{ prefix }}{{ dir }}">{{ dir }}</a></td>
+    <td class="size">—</td>
+    <td class="date">—</td>
+    <td class="actions"></td>
+</tr>
+{% endfor %}
+{% for file in files %}
+{% include "file_row.html" %}
+{% endfor %}
+{% if truncated %}
+<tr class="truncation-notice">
+    <td colspan="4">Showing first {{ row_cap }} results — refine your search to see more.</td>
+</tr>
+{% endif %}

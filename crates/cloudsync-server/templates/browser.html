@@ -18,36 +18,36 @@
         {% endfor %}
     </div>
 
-    {% if directories.is_empty() && files.is_empty() %}
-    <div class="empty">
-        <p>No files here.</p>
+    <div class="toolbar">
+        <input type="search"
+               name="q"
+               placeholder="Filter files…"
+               hx-get="/partials/files"
+               hx-trigger="input changed delay:200ms, search"
+               hx-target="#file-rows"
+               hx-swap="innerHTML"
+               hx-include="[name='prefix']"
+               autocomplete="off">
+        <input type="hidden" name="prefix" value="{{ prefix }}">
     </div>
-    {% else %}
+
     <table class="file-table">
         <thead>
             <tr>
                 <th>Name</th>
                 <th>Size</th>
                 <th>Modified</th>
+                <th></th>
             </tr>
         </thead>
-        <tbody>
-            {% for dir in directories %}
-            <tr>
-                <td><span class="icon">&#128193;</span><a href="/browse?prefix={{ prefix }}{{ dir }}">{{ dir }}</a></td>
-                <td class="size">—</td>
-                <td class="date">—</td>
-            </tr>
-            {% endfor %}
-            {% for file in files %}
-            <tr>
-                <td><a href="/api/v1/files/{{ file.path }}">{{ file.name }}</a></td>
-                <td class="size">{{ file.display_size }}</td>
-                <td class="date">{{ file.display_date }}</td>
-            </tr>
-            {% endfor %}
+        <tbody id="file-rows">
+            {% include "file_rows.html" %}
         </tbody>
     </table>
+    {% if directories.is_empty() && files.is_empty() %}
+    <div class="empty">
+        <p>No files here.</p>
+    </div>
     {% endif %}
 </main>
 {% endblock %}
