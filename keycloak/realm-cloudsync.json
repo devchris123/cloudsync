@@ -680,7 +680,7 @@
             "protocol": "openid-connect",
             "attributes": {
                 "oidc.ciba.grant.enabled": "false",
-                "oauth2.device.authorization.grant.enabled": "false",
+                "oauth2.device.authorization.grant.enabled": "true",
                 "backchannel.logout.session.required": "true",
                 "backchannel.logout.revoke.offline.tokens": "false"
             },

@@ -27,7 +27,8 @@ pub enum Command {
     /// Stores the resulting refresh+access tokens in `.cloudsync/config.toml`
     /// (0600 permissions). Auto-refreshes silently before each API call.
     /// `--mode loopback` opens a browser and catches the callback locally;
-    /// `--mode device` (step 5, not yet implemented) is for headless boxes.
+    /// `--mode device` prints a code for entry on another device (good for
+    /// SSH / headless boxes).
     Login {
         #[arg(
             long,
@@ -52,6 +53,7 @@ pub enum LoginMode {
     /// Best UX on desktops. Requires a working browser.
     Loopback,
     /// Print a code + URL for the user to enter on another device. RFC 8628.
-    /// Best for SSH / CI / headless. (Lands in step 5.)
+    /// Best for SSH / CI / headless. Requires the Keycloak realm's `cloudsync`
+    /// client to have `oauth2.device.authorization.grant.enabled = "true"`.
     Device,
 }

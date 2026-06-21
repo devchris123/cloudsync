@@ -29,7 +29,7 @@ use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use super::{OidcSession, TokenResponse, fetch_discovery};
+use super::{OidcSession, TokenResponse, extract_email_from_id_token, fetch_discovery};
 
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -110,7 +110,10 @@ async fn run_inner(server_url: &str) -> anyhow::Result<OidcSession> {
     .await?;
 
     let expires_in = token.expires_in.unwrap_or(300);
-    let email = token.id_token.as_deref().and_then(extract_email);
+    let email = token
+        .id_token
+        .as_deref()
+        .and_then(extract_email_from_id_token);
 
     Ok(OidcSession {
         issuer,
@@ -250,19 +253,12 @@ async fn exchange_code(
 }
 
 /// Extract `email` (falling back to `preferred_username`) from an unverified
-/// JWT for *display only*. We don't validate the signature here — the server
-/// will validate every access token on every API call, which is where auth
-/// integrity actually lives. This value is only used in `cloudsync status`.
+/// JWT for *display only*. The actual implementation lives in
+/// [`super::extract_email_from_id_token`] so the device flow can share it;
+/// this local alias is kept so the existing tests below stay readable.
+#[cfg(test)]
 fn extract_email(id_token: &str) -> Option<String> {
-    let mut parts = id_token.split('.');
-    let _header = parts.next()?;
-    let payload_b64 = parts.next()?;
-    let payload = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-    v.get("email")
-        .or_else(|| v.get("preferred_username"))
-        .and_then(|s| s.as_str())
-        .map(str::to_string)
+    super::extract_email_from_id_token(id_token)
 }
 
 fn urlencode(s: &str) -> String {

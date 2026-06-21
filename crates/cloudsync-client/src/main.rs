@@ -62,12 +62,7 @@ async fn login(server_url: String, mode: cli::LoginMode) -> anyhow::Result<()> {
 
     let session = match resolve_mode(mode) {
         cli::LoginMode::Loopback => auth::loopback::run(&server_url).await?,
-        cli::LoginMode::Device => {
-            anyhow::bail!(
-                "device flow is not yet implemented (tracked as step 5). \
-                 Use `--mode loopback` or `cloudsync init --token <T>` for now."
-            );
-        }
+        cli::LoginMode::Device => auth::device::run(&server_url).await?,
         // resolve_mode never returns Auto.
         cli::LoginMode::Auto => unreachable!(),
     };
