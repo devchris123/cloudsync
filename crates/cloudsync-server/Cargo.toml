@@ -21,6 +21,9 @@ tracing = { workspace = true }
 reqwest = { workspace = true }
 nanoid = "0.4"
 jsonwebtoken = "9"
+oauth2 = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }
+base64 = "0.22"
+rand = "0.8"
 # Web UI
 askama = "0.15"
 rust-embed = "8"

@@ -35,6 +35,7 @@ fn log_auth_posture(config: &config::ServerConfig) {
             issuer = %oidc.issuer,
             discovery_url = %oidc.discovery_url,
             audience = %oidc.audience,
+            client_id = %oidc.client_id,
             "auth: OIDC enabled (static token also accepted)"
         ),
         None => tracing::warn!("auth: OIDC disabled, only static token accepted"),
@@ -55,10 +56,12 @@ fn create_config(args: cli::Args) -> config::ServerConfig {
             args.oidc_issuer,
             args.oidc_discovery_url,
             args.oidc_audience,
+            args.oidc_client_id,
         ) {
-            (Some(issuer), discovery_url, Some(audience)) => Some(config::OidcConfig {
+            (Some(issuer), discovery_url, Some(audience), client_id) => Some(config::OidcConfig {
                 discovery_url: discovery_url.unwrap_or_else(|| issuer.clone()),
                 issuer,
+                client_id: client_id.unwrap_or_else(|| audience.clone()),
                 audience,
             }),
             _ => None,
@@ -84,6 +87,7 @@ mod tests {
             oidc_issuer: Some("https://example.com/issuer".to_string()),
             oidc_discovery_url: None,
             oidc_audience: Some("cloudsync".to_string()),
+            oidc_client_id: None,
         };
 
         let config = create_config(args);
@@ -93,6 +97,10 @@ mod tests {
         assert_eq!(oidc_config.issuer, "https://example.com/issuer");
         assert_eq!(oidc_config.discovery_url, "https://example.com/issuer");
         assert_eq!(oidc_config.audience, "cloudsync");
+        assert_eq!(
+            oidc_config.client_id, "cloudsync",
+            "client_id should default to audience when unset"
+        );
     }
 
     #[test]
@@ -112,6 +120,7 @@ mod tests {
             oidc_issuer: Some("https://auth.example.com/realms/cloudsync".to_string()),
             oidc_discovery_url: Some("http://keycloak:8080/realms/cloudsync".to_string()),
             oidc_audience: Some("cloudsync".to_string()),
+            oidc_client_id: None,
         };
 
         let config = create_config(args);
@@ -125,5 +134,33 @@ mod tests {
             oidc_config.discovery_url,
             "http://keycloak:8080/realms/cloudsync"
         );
+    }
+
+    #[test]
+    fn test_create_config_explicit_client_id() {
+        // The web/CLI OAuth client_id can be configured independently of the
+        // audience claim — the two collapse to the same value in the default
+        // Keycloak setup, but the resource server identity (audience) and the
+        // OAuth client identity (client_id) are different concepts.
+        let args = cli::Args {
+            host: "localhost".to_string(),
+            port: 0,
+            token: "test_token".to_string(),
+            storage_dir: "test_storage".to_string(),
+            staging_dir: "test_staging".to_string(),
+            dbname: "test_db".to_string(),
+            default_tenant_id: "test_tenant".to_string(),
+            default_user_id: "test_user".to_string(),
+            oidc_issuer: Some("https://example.com/issuer".to_string()),
+            oidc_discovery_url: None,
+            oidc_audience: Some("cloudsync-api".to_string()),
+            oidc_client_id: Some("cloudsync-web".to_string()),
+        };
+
+        let config = create_config(args);
+
+        let oidc_config = config.oidc_config.expect("oidc config should be set");
+        assert_eq!(oidc_config.audience, "cloudsync-api");
+        assert_eq!(oidc_config.client_id, "cloudsync-web");
     }
 }

@@ -2,6 +2,7 @@ pub struct OidcConfig {
     pub issuer: String,
     pub discovery_url: String,
     pub audience: String,
+    pub client_id: String,
 }
 
 pub struct ServerConfig {

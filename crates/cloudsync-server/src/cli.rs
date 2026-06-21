@@ -52,8 +52,15 @@ pub struct Args {
     #[arg(
         long,
         env = "CLOUDSYNC_OIDC_AUDIENCE",
-        help = "OIDC client ID used to validate the audience claim",
+        help = "Expected `aud` claim on incoming JWTs (the resource server identifier)",
         default_value = "cloudsync"
     )]
     pub oidc_audience: Option<String>,
+
+    #[arg(
+        long,
+        env = "CLOUDSYNC_OIDC_CLIENT_ID",
+        help = "OAuth client_id used by web UI + advertised to the CLI via /auth/info. Defaults to oidc_audience if unset."
+    )]
+    pub oidc_client_id: Option<String>,
 }

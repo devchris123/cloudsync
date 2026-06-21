@@ -27,7 +27,7 @@ use crate::{
     db::TenantDb,
     db_upload::TenantUploadDb,
     migrations,
-    oidc::{Claims, OidcValidator},
+    oidc::{Claims, OidcClient, OidcValidator},
 };
 
 use super::db;
@@ -42,6 +42,11 @@ pub struct AppState {
     pub default_tenant_id: String,
     pub default_user_id: String,
     pub oidc: Option<Arc<OidcValidator>>,
+    /// OAuth-client-role config. Always `Some` when `oidc` is `Some` —
+    /// they're populated together at bootstrap. The two stay separate
+    /// because they serve different roles (validate incoming tokens vs.
+    /// talk to the IdP); see `oidc::OidcClient` for the rationale.
+    pub oidc_client: Option<OidcClient>,
 }
 
 struct AppError(anyhow::Error, StatusCode);
@@ -81,6 +86,7 @@ async fn list_files(
     State(state): State<AppState>,
     ctx: UserContext,
 ) -> Result<Json<ListFilesResponse>, AppError> {
+    tracing::debug!(tenant_id = %ctx.tenant_id, user_id = %ctx.user_id, "list_files");
     let db = TenantDb::new(state.db, ctx);
     let files = db.list()?;
     Ok(Json(ListFilesResponse { files }))
@@ -262,6 +268,32 @@ async fn get_health() -> Result<Json<GetHealthResponse>, AppError> {
     }))
 }
 
+#[derive(serde::Serialize)]
+struct AuthInfoResponse {
+    /// Public issuer URL for the IdP. Unset means OIDC isn't configured on
+    /// this server and the CLI should fall back to static-token mode.
+    issuer: Option<String>,
+    /// OAuth client_id the CLI should present in its authorize/token requests.
+    client_id: Option<String>,
+}
+
+/// `GET /api/v1/auth/info` — unauthenticated discovery for CLI clients.
+///
+/// Lets `cloudsync login` learn what IdP to talk to without hard-coding the
+/// Keycloak URL into client config. Returns nulls when OIDC is disabled.
+async fn get_auth_info(State(state): State<AppState>) -> Json<AuthInfoResponse> {
+    match (&state.oidc, &state.oidc_client) {
+        (Some(validator), Some(client)) => Json(AuthInfoResponse {
+            issuer: Some(validator.issuer.clone()),
+            client_id: Some(client.client_id.clone()),
+        }),
+        _ => Json(AuthInfoResponse {
+            issuer: None,
+            client_id: None,
+        }),
+    }
+}
+
 async fn bearer_auth_layer(
     State(state): State<AppState>,
     mut request: Request,
@@ -279,12 +311,17 @@ async fn bearer_auth_layer(
         }
         if let Ok(Some(claims)) = claims {
             // tenant_id = sub for now; extend with custom claims for shared tenants later
+            tracing::debug!(auth = "bearer-oidc", sub = %claims.sub, "auth resolved");
             request.extensions_mut().insert(UserContext {
                 tenant_id: claims.sub.clone(),
                 user_id: claims.sub,
             });
         } else if auth_header.to_str().unwrap_or("") == format!("Bearer {}", state.token) {
-            tracing::trace!("bearer token valid (Servertoken)");
+            tracing::debug!(
+                auth = "bearer-static",
+                user_id = %state.default_user_id,
+                "auth resolved"
+            );
             request.extensions_mut().insert(UserContext {
                 tenant_id: state.default_tenant_id,
                 user_id: state.default_user_id,
@@ -311,11 +348,29 @@ async fn cookie_auth_layer(
     mut request: Request,
     next: Next,
 ) -> Response {
-    if let Some(cookie_header) = request.headers().get(axum::http::header::COOKIE)
-        && let Ok(cookie_str) = cookie_header.to_str()
-        && crate::ui::verify_session_cookie(cookie_str, &state.token)
-    {
-        tracing::trace!("session cookie valid");
+    let Some(cookie_str) = request
+        .headers()
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return next.run(request).await;
+    };
+
+    // Prefer the OIDC user-session cookie when present — it carries a real
+    // identity. Fall back to the legacy static-token cookie (shared identity).
+    if let Some(session) = crate::oidc_web::read_session_cookie(&state.token, cookie_str) {
+        tracing::debug!(auth = "cookie-oidc", sub = %session.sub, "auth resolved");
+        // Match the bearer layer (app.rs:282-285): tenant = user = sub.
+        request.extensions_mut().insert(UserContext {
+            tenant_id: session.sub.clone(),
+            user_id: session.sub,
+        });
+    } else if crate::ui::verify_session_cookie(cookie_str, &state.token) {
+        tracing::debug!(
+            auth = "cookie-static",
+            user_id = %state.default_user_id,
+            "auth resolved"
+        );
         request.extensions_mut().insert(UserContext {
             tenant_id: state.default_tenant_id,
             user_id: state.default_user_id,
@@ -370,13 +425,25 @@ pub fn create_app(state: AppState) -> Router {
             get(crate::ui::login_page).post(crate::ui::login_submit),
         )
         .route("/logout", post(crate::ui::logout))
-        .route("/browse", get(crate::ui::browse))
+        .route("/auth/login", get(crate::oidc_web::login))
+        .route("/auth/callback", get(crate::oidc_web::callback))
         .route("/static/{*path}", get(crate::ui::static_file));
+
+    // `/browse` needs the cookie auth layer so it can serve a per-user file
+    // list; on missing/invalid cookie it redirects to /login itself.
+    let browse_router = Router::<AppState>::new()
+        .route("/browse", get(crate::ui::browse))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            cookie_auth_layer,
+        ));
 
     Router::<AppState>::new()
         .route("/api/v1/health", get(get_health))
+        .route("/api/v1/auth/info", get(get_auth_info))
         .merge(auth_router)
         .merge(ui_router)
+        .merge(browse_router)
         .layer(TraceLayer::new_for_http())
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50MB
         .with_state(state)
@@ -389,6 +456,19 @@ pub fn bootstrap_app(config: ServerConfig) -> anyhow::Result<Router> {
     migrations::run_migrations(&db, &config.default_tenant_id, &config.default_user_id)?;
 
     let db = Arc::new(db);
+    let (oidc, oidc_client) = match config.oidc_config {
+        Some(cfg) => (
+            Some(Arc::new(OidcValidator::new(
+                cfg.issuer,
+                cfg.discovery_url,
+                cfg.audience,
+            ))),
+            Some(OidcClient {
+                client_id: cfg.client_id,
+            }),
+        ),
+        None => (None, None),
+    };
     let state = AppState {
         db,
         storage_dir: config.storage_dir,
@@ -396,13 +476,8 @@ pub fn bootstrap_app(config: ServerConfig) -> anyhow::Result<Router> {
         token: config.token,
         default_tenant_id: config.default_tenant_id,
         default_user_id: config.default_user_id,
-        oidc: config.oidc_config.map(|oidc| {
-            Arc::new(OidcValidator::new(
-                oidc.issuer,
-                oidc.discovery_url,
-                oidc.audience,
-            ))
-        }),
+        oidc,
+        oidc_client,
     };
     let app = create_app(state);
     Ok(app)

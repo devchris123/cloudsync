@@ -78,6 +78,7 @@ impl From<jsonwebtoken::errors::Error> for ValidationError {
 pub struct OidcValidator {
     pub issuer: String,
     pub discovery_url: String,
+    /// Expected `aud` claim on incoming JWTs — the resource-server identifier.
     pub audience: String,
     pub client: Client,
     well_known_cache: Arc<RwLock<Option<(OidcDiscovery, std::time::Instant)>>>,
@@ -225,6 +226,19 @@ impl OidcValidator {
         let claims = jsonwebtoken::decode::<Claims>(jwt, &key, &validation)?;
         Ok(claims.claims)
     }
+}
+
+/// OAuth-client-role config: how this server identifies itself when *talking
+/// to* the IdP (web UI redirect flow) and what it advertises to the CLI via
+/// `/api/v1/auth/info`.
+///
+/// Distinct from [`OidcValidator`], which is the resource-server role — i.e.
+/// validating tokens this server *receives*. The two strings frequently
+/// coincide in single-app Keycloak setups (`client_id == audience`), but the
+/// concepts are orthogonal and may diverge in multi-client deployments.
+#[derive(Clone)]
+pub struct OidcClient {
+    pub client_id: String,
 }
 
 #[cfg(test)]

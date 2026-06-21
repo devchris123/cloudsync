@@ -8,9 +8,15 @@
     {% if !error.is_empty() %}
     <p class="error">{{ error }}</p>
     {% endif %}
+
+    {% if oidc_enabled %}
+    <a class="sso-button" href="/auth/login">Sign in with Keycloak</a>
+    <p class="divider"><span>or use an access token</span></p>
+    {% endif %}
+
     <form method="post" action="/login">
         <label for="token">Access Token</label>
-        <input type="password" id="token" name="token" placeholder="Enter your bearer token" required autofocus>
+        <input type="password" id="token" name="token" placeholder="Enter your bearer token" required>
         <button type="submit">Sign in</button>
     </form>
 </div>
