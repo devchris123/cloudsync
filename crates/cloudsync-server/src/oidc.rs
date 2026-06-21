@@ -23,9 +23,18 @@ pub struct Claims {
 }
 
 #[derive(Deserialize, Clone)]
-struct OidcDiscovery {
-    jwks_uri: String,
-    issuer: String,
+pub struct OidcDiscovery {
+    pub jwks_uri: String,
+    pub issuer: String,
+    // Required by OIDC core, but kept Option so test fixtures and any non-conforming
+    // provider don't fail to deserialize. Consumers that need them call .ok_or_else().
+    pub authorization_endpoint: Option<String>,
+    pub token_endpoint: Option<String>,
+    // Optional in the spec; Keycloak provides both. The web-login flow uses
+    // end_session_endpoint for RP-initiated logout; the CLI device flow uses
+    // device_authorization_endpoint.
+    pub end_session_endpoint: Option<String>,
+    pub device_authorization_endpoint: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -114,6 +123,22 @@ impl OidcValidator {
             Err(ValidationError::MissingKid) => anyhow::bail!("missing kid header field"),
             Err(ValidationError::Other(err)) => Err(err),
         }
+    }
+
+    /// Return the cached OIDC discovery document, fetching it if absent or stale.
+    ///
+    /// Shares the same `well_known_cache` as `validate`, so callers that need
+    /// `authorization_endpoint`/`token_endpoint`/etc. (browser login, CLI flows)
+    /// don't add a second roundtrip per request. Enforces the same issuer-match
+    /// check as `validate` — a discovery doc whose `iss` doesn't match config is
+    /// rejected, since trusting its endpoints would be equivalent to trusting an
+    /// attacker-controlled IdP.
+    pub async fn discovery(&self) -> anyhow::Result<OidcDiscovery> {
+        let oidc = self.fetch_well_known().await?;
+        if oidc.issuer != self.issuer {
+            anyhow::bail!("issuer does not match");
+        }
+        Ok(oidc)
     }
 
     async fn fetch_well_known(&self) -> anyhow::Result<OidcDiscovery> {
