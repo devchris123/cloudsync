@@ -1,0 +1,38 @@
+# Build context exclusions for `docker build` / `docker compose build`.
+#
+# Without this file the entire worktree is tarred and sent to the daemon —
+# including target/ (gigabytes of cargo output) and .git/. That makes the
+# first `docker compose -f docker-compose.local.yml build` painfully slow
+# and gives BuildKit no cache benefit on iteration.
+#
+# Pattern syntax matches .gitignore.
+
+# Rust build artifacts — biggest single win.
+target/
+**/target/
+
+# Git internals — never needed at build time.
+.git/
+.gitignore
+.gitattributes
+
+# Editor / tooling state
+.claude/
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# CI / docs — the Dockerfile only needs Cargo manifests + source.
+.github/
+docs/
+*.md
+
+# Other compose files — they're not part of the build, but leaving them in
+# the context busts the cache whenever you tweak one.
+docker-compose*.yml
+.env*
+
+# Keycloak realm import is mounted at runtime, not baked into the image.
+keycloak/
