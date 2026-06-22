@@ -1,0 +1,91 @@
+# Local development docker-compose: Keycloak + cloudsync only.
+#
+# Why a separate file: the prod docker-compose.yml hard-codes the public
+# hostnames (auth.devchris.dev, etc.) and runs Caddy/Grafana/Loki you don't
+# need just to test the auth flow. This file strips it down to the two
+# services that matter and wires them for localhost.
+#
+# How to use:
+#   1. Build the local server image:
+#        docker compose -f docker-compose.local.yml build cloudsync
+#   2. Start everything:
+#        docker compose -f docker-compose.local.yml up -d
+#   3. First time only — create a test user via the Keycloak admin UI:
+#        http://localhost:8081  →  log in with admin / admin
+#        Realm "cloudsync"  →  Users  →  Add user  (set email + a password)
+#   4. Open http://localhost:3050/login and click "Sign in with Keycloak".
+#   5. Tear down (this also wipes Keycloak's data so the realm re-imports
+#      on next start; drop `-v` to keep the user across restarts):
+#        docker compose -f docker-compose.local.yml down -v
+#
+# The URL split: the BROWSER reaches Keycloak at http://localhost:8081 (port
+# published from the container). The SERVER reaches Keycloak at the internal
+# DNS name http://keycloak:8080 (compose network). Both must agree on what
+# the `iss` claim looks like — that's `KC_HOSTNAME=localhost` +
+# `KC_HOSTNAME_PORT=8081`, which makes Keycloak emit tokens with
+# `iss=http://localhost:8081/realms/cloudsync` regardless of which path
+# brought the request in.
+
+services:
+  cloudsync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3050:3050"
+    environment:
+      # Static-token fallback — still works alongside OIDC.
+      - CLOUDSYNC_TOKEN=local-dev-token
+      - CLOUDSYNC_HOST=0.0.0.0
+      - CLOUDSYNC_STORAGE_DIR=/data/files
+      - CLOUDSYNC_STAGING_DIR=/data/staging
+      - CLOUDSYNC_DBNAME=/data/data.redb
+      - CLOUDSYNC_DEFAULT_TENANT_ID=local-tenant
+      - CLOUDSYNC_DEFAULT_USER_ID=local-user
+      # OIDC: issuer = what the IdP writes in `iss`; must match what's
+      # observable from both the browser AND the server. With
+      # KC_HOSTNAME=localhost:8081, Keycloak emits exactly this string.
+      - CLOUDSYNC_OIDC_ISSUER=http://localhost:8081/realms/cloudsync
+      # Discovery URL: where THIS process fetches .well-known/JWKS/token from.
+      # Server runs in a container, so localhost would be itself — use the
+      # compose-network name instead.
+      - CLOUDSYNC_OIDC_DISCOVERY_URL=http://keycloak:8080/realms/cloudsync
+      - CLOUDSYNC_OIDC_AUDIENCE=cloudsync
+      # Tells the web-login flow what redirect_uri to send, in lieu of the
+      # X-Forwarded-* headers we'd get from Caddy in prod.
+      - CLOUDSYNC_PUBLIC_BASE_URL=http://localhost:3050
+      - RUST_LOG=cloudsync_server=debug
+    volumes:
+      - cloudsync_data:/data
+    depends_on:
+      - keycloak
+    restart: unless-stopped
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0.3
+    ports:
+      - "8081:8080"
+    environment:
+      - KEYCLOAK_ADMIN=admin
+      - KEYCLOAK_ADMIN_PASSWORD=admin
+      # Bare hostname (no scheme, no path) — passing a URL here breaks
+      # token-issuer generation. See the production compose for the same
+      # gotcha documented there.
+      - KC_HOSTNAME=localhost
+      # The port the BROWSER will see — published to the host as 8081.
+      - KC_HOSTNAME_PORT=8081
+      - KC_HOSTNAME_STRICT=false
+      - KC_HOSTNAME_STRICT_BACKCHANNEL=false
+      - KC_HTTP_ENABLED=true
+    command: ["start-dev", "--import-realm"]
+    volumes:
+      # Same bootstrap JSON the prod stack uses. `--import-realm` only takes
+      # effect on first boot of an empty data dir — that's why `down -v`
+      # above is the way to re-test from a clean realm.
+      - ./keycloak/realm-cloudsync.json:/opt/keycloak/data/import/realm-cloudsync.json:ro
+      - keycloak_data:/opt/keycloak/data
+    restart: unless-stopped
+
+volumes:
+  cloudsync_data:
+  keycloak_data:
