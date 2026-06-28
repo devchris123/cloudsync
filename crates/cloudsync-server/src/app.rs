@@ -242,24 +242,35 @@ async fn finalize_upload(
     }
     let staging_dir = std::path::Path::new(&state.staging_dir).join(&upload_id);
     let storage_path = storage::get_storage_path(&state.storage_dir, &upload.total_hash);
-    std::fs::create_dir_all(storage_path.parent().unwrap())?;
-    let mut storage_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&storage_path)?;
-    for chunk_index in 0..upload.chunk_count {
-        let chunk_path = staging_dir.join(chunk_index.to_string());
-        let mut chunk_file = std::fs::OpenOptions::new().read(true).open(chunk_path)?;
-        std::io::copy(&mut chunk_file, &mut storage_file)?;
-    }
+    // Content-addressable storage: the blob may already exist if this hash was
+    // uploaded before (same user re-uploading after a delete, or a different
+    // user uploading identical bytes). Skip reassembly in that case — the
+    // existing blob IS the answer. Without this guard, the old `.append(true)`
+    // path doubled the file and the hash check below blew up with a 500.
+    if !storage_path.exists() {
+        std::fs::create_dir_all(storage_path.parent().unwrap())?;
+        let mut storage_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&storage_path)?;
+        for chunk_index in 0..upload.chunk_count {
+            let chunk_path = staging_dir.join(chunk_index.to_string());
+            let mut chunk_file = std::fs::OpenOptions::new().read(true).open(chunk_path)?;
+            std::io::copy(&mut chunk_file, &mut storage_file)?;
+        }
 
-    let total_hash = hash_file(&storage_path)?;
-    if upload.total_hash != total_hash {
-        return Err(AppError(
-            anyhow::anyhow!("unexpected hash mismatch after writing"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        ));
+        let total_hash = hash_file(&storage_path)?;
+        if upload.total_hash != total_hash {
+            return Err(AppError(
+                anyhow::anyhow!("unexpected hash mismatch after writing"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ));
+        }
     }
+    // `db.put` overwrites any prior row at this path — including a soft-deleted
+    // one — bumping `version` and resetting `is_deleted`, so the re-upload of a
+    // previously-deleted file lands as a fresh row without special-casing here.
     let db = TenantDb::new(state.db, ctx);
     let file = db.put(&upload.path, upload.total_size, &upload.total_hash)?;
     upload_db.delete(&upload_id)?;
