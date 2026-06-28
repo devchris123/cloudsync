@@ -17,6 +17,11 @@ services:
       - CLOUDSYNC_OIDC_ISSUER=https://auth.devchris.dev/realms/cloudsync
       - CLOUDSYNC_OIDC_DISCOVERY_URL=http://keycloak:8080/realms/cloudsync
       - CLOUDSYNC_OIDC_AUDIENCE=cloudsync
+      # Pin the public base URL so cookie `Secure` flag is deterministic
+      # rather than derived from X-Forwarded-Proto. A misconfigured proxy
+      # that drops the header would otherwise silently downgrade session
+      # cookies to non-Secure.
+      - CLOUDSYNC_PUBLIC_BASE_URL=https://cloudsync.devchris.dev
       - RUST_LOG=cloudsync_server=info
     restart: unless-stopped
 

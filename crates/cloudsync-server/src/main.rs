@@ -13,6 +13,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let config = create_config(args);
     log_auth_posture(&config);
+    log_base_url_posture(&config);
 
     // Start server
     let host = config.host.clone();
@@ -39,6 +40,50 @@ fn log_auth_posture(config: &config::ServerConfig) {
             "auth: OIDC enabled (static token also accepted)"
         ),
         None => tracing::warn!("auth: OIDC disabled, only static token accepted"),
+    }
+}
+
+/// Warn if the deployment looks like it's serving over plain HTTP to a
+/// non-loopback host. Without `CLOUDSYNC_PUBLIC_BASE_URL` pinned to https,
+/// the cookie `Secure` flag is derived from `X-Forwarded-Proto` headers —
+/// a misconfigured reverse proxy can silently downgrade session cookies to
+/// non-Secure, leaving them sniffable on any plain-HTTP hop. Setting the
+/// env var to the real https URL makes the decision deterministic and
+/// immune to header weirdness.
+fn log_base_url_posture(config: &config::ServerConfig) {
+    let public = std::env::var("CLOUDSYNC_PUBLIC_BASE_URL").ok();
+    let loopback = matches!(config.host.as_str(), "127.0.0.1" | "::1" | "localhost");
+    match (public.as_deref(), loopback) {
+        (Some(url), _) if url.starts_with("https://") => {
+            tracing::info!(
+                base_url = url,
+                "base URL: pinned via CLOUDSYNC_PUBLIC_BASE_URL"
+            );
+        }
+        (Some(url), true) => {
+            tracing::info!(
+                base_url = url,
+                "base URL: pinned via CLOUDSYNC_PUBLIC_BASE_URL (http, loopback bind)"
+            );
+        }
+        (Some(url), false) => {
+            tracing::warn!(
+                base_url = url,
+                "base URL: CLOUDSYNC_PUBLIC_BASE_URL set to non-https on a non-loopback bind — \
+                 cookies will be minted without `Secure` and travel in cleartext to any \
+                 plain-HTTP client"
+            );
+        }
+        (None, true) => {
+            tracing::info!("base URL: not pinned, loopback bind — relying on request headers");
+        }
+        (None, false) => {
+            tracing::warn!(
+                "base URL: CLOUDSYNC_PUBLIC_BASE_URL unset on a non-loopback bind — \
+                 cookie Secure flag will be derived from X-Forwarded-Proto, which a \
+                 misconfigured proxy can silently strip. Pin to the public https URL."
+            );
+        }
     }
 }
 
