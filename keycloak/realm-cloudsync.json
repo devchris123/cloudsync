@@ -654,7 +654,7 @@
             "id": "b4b1efe3-db0c-478b-9e94-b83e0d0c573f",
             "clientId": "cloudsync",
             "name": "cloudsync-client",
-            "description": "cloudsync keycloak client for testing",
+            "description": "cloudsync server: web UI + CLI auth client",
             "rootUrl": "",
             "adminUrl": "",
             "baseUrl": "",
@@ -663,17 +663,17 @@
             "alwaysDisplayInConsole": false,
             "clientAuthenticatorType": "client-secret",
             "redirectUris": [
-                "/*"
+                "https://cloudsync.devchris.dev/auth/callback",
+                "https://cloudsync.devchris.dev/login",
+                "http://127.0.0.1/callback"
             ],
-            "webOrigins": [
-                "/*"
-            ],
+            "webOrigins": [],
             "notBefore": 0,
             "bearerOnly": false,
-            "consentRequired": false,
+            "consentRequired": true,
             "standardFlowEnabled": true,
             "implicitFlowEnabled": false,
-            "directAccessGrantsEnabled": true,
+            "directAccessGrantsEnabled": false,
             "serviceAccountsEnabled": false,
             "publicClient": true,
             "frontchannelLogout": true,
@@ -685,7 +685,7 @@
                 "backchannel.logout.revoke.offline.tokens": "false"
             },
             "authenticationFlowBindingOverrides": {},
-            "fullScopeAllowed": true,
+            "fullScopeAllowed": false,
             "nodeReRegistrationTimeout": -1,
             "protocolMappers": [
                 {
