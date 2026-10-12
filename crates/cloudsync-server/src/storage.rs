@@ -84,13 +84,6 @@ mod test {
         Ok(file)
     }
 
-    fn write_chunks(staging: &std::path::Path, chunks: &[&[u8]]) {
-        std::fs::create_dir_all(staging).unwrap();
-        for (i, c) in chunks.iter().enumerate() {
-            std::fs::write(staging.join(i.to_string()), c).unwrap();
-        }
-    }
-
     #[test]
     fn reassemble_chunks_writes_concatenated_blob() {
         let dir = TempDir::new().unwrap();
@@ -144,5 +137,12 @@ mod test {
         // flip this assertion. Not doing it now because the storage path is
         // keyed by the hash that DIDN'T match, so nothing else will look it up.
         assert!(leaked.exists());
+    }
+
+    fn write_chunks(staging: &std::path::Path, chunks: &[&[u8]]) {
+        std::fs::create_dir_all(staging).unwrap();
+        for (i, c) in chunks.iter().enumerate() {
+            std::fs::write(staging.join(i.to_string()), c).unwrap();
+        }
     }
 }
