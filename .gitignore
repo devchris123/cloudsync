@@ -5,3 +5,4 @@ data.redb
 .claude/worktrees/
 .env
 .local
+.vscode
