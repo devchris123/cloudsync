@@ -36,8 +36,8 @@ use super::storage;
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<Database>,
-    pub storage_dir: String,
-    pub staging_dir: String,
+    pub storage_dir: std::path::PathBuf,
+    pub staging_dir: std::path::PathBuf,
     pub token: String,
     pub default_tenant_id: String,
     pub default_user_id: String,
@@ -73,11 +73,15 @@ impl<S: Send + Sync> FromRequestParts<S> for UserContext {
         parts: &mut axum::http::request::Parts,
         _: &S,
     ) -> Result<Self, Self::Rejection> {
-        parts
+        let ctx = parts
             .extensions
             .get::<UserContext>()
             .cloned()
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+            .ok_or(StatusCode::UNAUTHORIZED)?;
+        if ctx.tenant_id.is_empty() || ctx.user_id.is_empty() {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        Ok(ctx)
     }
 }
 
@@ -110,7 +114,7 @@ async fn post_file(
     let path = path.unwrap();
     let content = content.unwrap();
 
-    let content_hash: String = storage::write(&state.storage_dir, &content)?;
+    let content_hash: String = storage::write(&state.storage_dir, &ctx.tenant_id, &content)?;
     tracing::info!("file stored: {} (hash: {})", path, content_hash);
     let db = TenantDb::new(state.db, ctx);
     let file_meta = db.put(&path, content.len() as u64, &content_hash)?;
@@ -144,6 +148,7 @@ async fn get_file(
     ctx: UserContext,
     request: Request,
 ) -> Result<impl IntoResponse, AppError> {
+    let tenant_id = ctx.tenant_id.clone();
     let db = TenantDb::new(state.db, ctx);
     let file_meta = db.get(&path)?;
     let Some(file_meta) = file_meta else {
@@ -159,7 +164,7 @@ async fn get_file(
         file_meta.version
     );
     let content_hash = file_meta.content_hash;
-    let path = storage::get_storage_path(&state.storage_dir, &content_hash);
+    let path = storage::get_storage_path(&state.storage_dir, tenant_id.as_str(), &content_hash);
     let resp = ServeFile::new(path).oneshot(request).await?;
     Ok(resp.into_response())
 }
@@ -243,6 +248,7 @@ async fn finalize_upload(
     let staging_dir = std::path::Path::new(&state.staging_dir).join(&upload_id);
     storage::reassemble_chunks(
         &state.storage_dir,
+        ctx.tenant_id.as_str(),
         &staging_dir,
         upload.chunk_count,
         &upload.total_hash,
@@ -477,8 +483,8 @@ pub fn bootstrap_app(config: ServerConfig) -> anyhow::Result<Router> {
     };
     let state = AppState {
         db,
-        storage_dir: config.storage_dir,
-        staging_dir: config.staging_dir,
+        storage_dir: std::path::PathBuf::from(&config.storage_dir),
+        staging_dir: std::path::PathBuf::from(&config.staging_dir),
         token: config.token,
         default_tenant_id: config.default_tenant_id,
         default_user_id: config.default_user_id,
@@ -497,5 +503,23 @@ mod tests {
     async fn test_health() {
         let result = get_health().await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_user_context_rejects_empty_identity() {
+        let tests = [("", "user"), ("tenant", ""), ("", "")];
+
+        for (tenant_id, user_id) in tests {
+            let mut request = axum::http::Request::new(());
+            request.extensions_mut().insert(UserContext {
+                tenant_id: tenant_id.into(),
+                user_id: user_id.into(),
+            });
+
+            let (mut parts, _) = request.into_parts();
+            let result = UserContext::from_request_parts(&mut parts, &()).await;
+
+            assert!(matches!(result, Err(StatusCode::UNAUTHORIZED)));
+        }
     }
 }
