@@ -18,7 +18,7 @@ pub async fn pull(
         if let Err(e) =
             pull_single_file(db, sync_client, sync_root, &file_meta, on_file_start).await
         {
-            println!("error pulling {}: {}", &file_meta.path, e);
+            println!("error pulling {}: {}", file_meta.path, e);
             continue;
         }
     }
@@ -77,7 +77,7 @@ async fn pull_single_file(
                         std::fs::remove_file(conflict_path_backup)?;
                         anyhow::bail!(
                             "Corrupt download: hash does not match for {}",
-                            &file_meta.path
+                            file_meta.path
                         );
                     }
                     std::fs::rename(conflict_path_backup, &conflict_path)?;
@@ -107,7 +107,7 @@ async fn pull_single_file(
         std::fs::remove_file(local_path_backup)?;
         anyhow::bail!(
             "Corrupt download: hash does not match for {}",
-            &file_meta.path
+            file_meta.path
         );
     }
     std::fs::rename(local_path_backup, local_path)?;
@@ -118,7 +118,7 @@ async fn pull_single_file(
         upload_id: None,
     };
     db::put(db, &sync_record)?;
-    println!("pulled: {}", &file_meta.path);
+    println!("pulled: {}", file_meta.path);
 
     Ok(())
 }

@@ -25,7 +25,7 @@ pub async fn status(
         let sync_record = db::get(db, &rel_path)?;
 
         let Some(sync_record) = sync_record else {
-            println!("{} - new (local)", &rel_path);
+            println!("{} - new (local)", rel_path);
             continue;
         };
         let server_hash = file_metas.iter().find(|f| f.path == rel_path);
@@ -34,19 +34,19 @@ pub async fn status(
             if let Some(sf) = server_hash
                 && sf.version > sync_record.server_version
             {
-                println!("{} - conflict", &rel_path);
+                println!("{} - conflict", rel_path);
                 continue;
             }
-            println!("{} - update (local)", &rel_path);
+            println!("{} - update (local)", rel_path);
             continue;
         }
         if let Some(server_hash) = server_hash
             && server_hash.content_hash != sync_record.local_hash
         {
-            println!("{} - update (server)", &rel_path);
+            println!("{} - update (server)", rel_path);
             continue;
         }
-        println!("{} - no update", &rel_path);
+        println!("{} - no update", rel_path);
     }
 
     for server_file in file_metas {
@@ -59,9 +59,9 @@ pub async fn status(
         let path = sync_root.join(&server_file.path);
         let sync_record = db::get(db, &server_file.path)?;
         if sync_record.is_none() {
-            println!("{} - new (server)", server_file.path)
+            println!("{} - new (server)", server_file.path);
         } else if !path.exists() {
-            println!("{} - deleted (local)", &server_file.path);
+            println!("{} - deleted (local)", server_file.path);
         }
     }
     Ok(())

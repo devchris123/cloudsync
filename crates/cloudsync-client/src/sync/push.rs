@@ -24,11 +24,7 @@ pub async fn push(
         let total_size = local_path.metadata()?.len();
         if total_size < CHUNK_SIZE {
             if let Err(e) = push_single_file(db, sync_client, sync_root, local_path).await {
-                println!(
-                    "error pushing {}: {}",
-                    &local_path.to_str().unwrap().to_string(),
-                    e
-                );
+                println!("error pushing {}: {}", local_path.to_str().unwrap(), e);
                 continue;
             }
         } else if let Err(e) =
@@ -36,7 +32,7 @@ pub async fn push(
         {
             println!(
                 "error pushing chunked {}: {}",
-                &local_path.to_str().unwrap().to_string(),
+                local_path.to_str().unwrap(),
                 e
             );
             continue;
@@ -48,7 +44,7 @@ pub async fn push(
         if !sync_root.join(&sr.path).exists()
             && let Err(e) = delete_file(sync_client, db, &sr.path).await
         {
-            println!("error deleting {}: {}", &sr.path, e);
+            println!("error deleting {}: {}", sr.path, e);
             continue;
         }
     }
@@ -82,7 +78,7 @@ async fn push_single_file(
         upload_id: None,
     };
     db::put(db, &sync_record)?;
-    println!("pushed: {}", &rel_path);
+    println!("pushed: {}", rel_path);
     Ok(())
 }
 
@@ -216,7 +212,7 @@ async fn resume_upload(
         upload_id: None,
     };
     db::put(db, &sync_record)?;
-    println!("pushed: {}", &rel_path);
+    println!("pushed: {}", rel_path);
     Ok(())
 }
 

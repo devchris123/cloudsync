@@ -119,7 +119,7 @@ async fn setup() -> anyhow::Result<(Database, client::SyncClient, PathBuf)> {
     sync_client
         .health()
         .await
-        .map_err(|_| anyhow::anyhow!("Cannot connect to server at {}", &config.server_url))?;
+        .map_err(|_| anyhow::anyhow!("Cannot connect to server at {}", config.server_url))?;
     Ok((db, sync_client, sync_root))
 }
 
