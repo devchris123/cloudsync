@@ -6,6 +6,7 @@ pub const DEFAULT_DBNAME: &str = "data.redb";
 pub const DEFAULT_TENANT_ID: &str = "default-tenant";
 pub const DEFAULT_USER_ID: &str = "default-user";
 pub const DEFAULT_OIDC_AUDIENCE: &str = "cloudsync";
+pub const DEFAULT_USER_QUOTA_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 pub struct OidcConfig {
     pub issuer: String,
@@ -25,6 +26,7 @@ pub struct ServerConfig {
     pub default_user_id: String,
     pub oidc_config: Option<OidcConfig>,
     pub max_upload_file_size: u64,
+    pub default_user_quota_bytes: u64,
 }
 
 impl ServerConfig {
@@ -42,6 +44,7 @@ impl ServerConfig {
             default_user_id: DEFAULT_USER_ID.into(),
             oidc_config: None,
             max_upload_file_size: 10 * 1024 * 1024 * 1024, // 10 GiB
+            default_user_quota_bytes: DEFAULT_USER_QUOTA_BYTES,
         }
     }
 }

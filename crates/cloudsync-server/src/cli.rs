@@ -38,6 +38,14 @@ pub struct Args {
 
     #[arg(
         long,
+        env = "CLOUDSYNC_DEFAULT_USER_QUOTA_BYTES",
+        help = "Default per-user storage quota in bytes (used when no per-user override is set)",
+        default_value_t = config::DEFAULT_USER_QUOTA_BYTES
+    )]
+    pub default_user_quota_bytes: u64,
+
+    #[arg(
+        long,
         env = "CLOUDSYNC_OIDC_ISSUER",
         help = "Expected issuer URL for JWT validation"
     )]
