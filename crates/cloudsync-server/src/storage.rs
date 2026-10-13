@@ -1,4 +1,5 @@
 use cloudsync_common::{hash_bytes, hash_file};
+use tempfile;
 
 pub fn write(
     data_dir: &std::path::Path,
@@ -54,21 +55,28 @@ pub fn reassemble_chunks(
     if storage_path.exists() {
         return Ok(storage_path);
     }
-    std::fs::create_dir_all(storage_path.parent().unwrap())?;
-    let mut storage_file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&storage_path)?;
+
+    let storage_dir = storage_path.parent().unwrap();
+    std::fs::create_dir_all(storage_dir)?;
+    let mut temp_storage_file = tempfile::NamedTempFile::new_in(storage_dir)?;
+
     for chunk_index in 0..chunk_count {
         let chunk_path = staging_dir.join(chunk_index.to_string());
         let mut chunk_file = std::fs::File::open(chunk_path)?;
-        std::io::copy(&mut chunk_file, &mut storage_file)?;
+        std::io::copy(&mut chunk_file, &mut temp_storage_file)?;
     }
-    let actual_hash = hash_file(&storage_path)?;
+
+    let actual_hash = hash_file(&temp_storage_file.path())?;
     if actual_hash != expected_hash {
+        let res = std::fs::remove_file(&temp_storage_file);
+        if let Err(err) = res {
+            tracing::error!("failed to remove temporary file: {}", err)
+        }
         anyhow::bail!("unexpected hash mismatch after writing");
     }
+
+    temp_storage_file.persist(&storage_path)?;
+
     Ok(storage_path)
 }
 
@@ -199,7 +207,7 @@ mod test {
         // failure leaves a corrupt blob behind. If we ever clean up on error,
         // flip this assertion. Not doing it now because the storage path is
         // keyed by the hash that DIDN'T match, so nothing else will look it up.
-        assert!(leaked.exists());
+        assert!(!leaked.exists());
     }
 
     fn write_chunks(staging: &std::path::Path, chunks: &[&[u8]]) {
