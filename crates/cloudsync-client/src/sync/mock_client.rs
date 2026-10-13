@@ -20,7 +20,7 @@ pub struct MockClient {
     pub send_chunk_count: RefCell<u64>,
     pub send_chunk_fails: RefCell<bool>,
     pub get_upload_count: RefCell<u64>,
-    pub get_upload_chunks_received: RefCell<Vec<u32>>,
+    pub get_upload_chunks_received: RefCell<Vec<u64>>,
     pub get_upload_chunk_count: RefCell<u64>,
     pub get_upload_fail_id: RefCell<Option<String>>,
     pub finalize_upload_count: RefCell<u64>,
@@ -59,7 +59,7 @@ impl MockClient {
         *self.send_chunk_fails.borrow_mut() = fails;
     }
 
-    pub fn set_upload_chunks_received(&self, chunks: Vec<u32>) {
+    pub fn set_upload_chunks_received(&self, chunks: Vec<u64>) {
         *self.get_upload_chunks_received.borrow_mut() = chunks;
     }
 

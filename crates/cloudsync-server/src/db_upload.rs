@@ -57,7 +57,7 @@ impl TenantUploadDb {
         Ok(upload)
     }
 
-    pub fn add_chunk(&self, upload_id: &str, chunk_index: u32) -> anyhow::Result<Upload> {
+    pub fn add_chunk(&self, upload_id: &str, chunk_index: u64) -> anyhow::Result<Upload> {
         // get upload
         let tx = self.db.begin_write()?;
         let mut upload = {
