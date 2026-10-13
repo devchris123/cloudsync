@@ -40,6 +40,7 @@ async fn test_push_and_pull() {
         default_tenant_id: "tenant".to_string(),
         default_user_id: "user".to_string(),
         oidc_config: None,
+        max_upload_file_size: 10 * 1024 * 1024 * 1024,
     })
     .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -123,6 +124,7 @@ async fn test_pull_conflict() {
         default_tenant_id: "tenant".to_string(),
         default_user_id: "user".to_string(),
         oidc_config: None,
+        max_upload_file_size: 10 * 1024 * 1024 * 1024,
     })
     .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

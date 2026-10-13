@@ -1,5 +1,6 @@
 use cloudsync_common::{hash_bytes, hash_file};
-use tempfile;
+
+pub const HASH_SIZE: usize = 64;
 
 pub fn write(
     data_dir: &std::path::Path,
@@ -56,7 +57,9 @@ pub fn reassemble_chunks(
         return Ok(storage_path);
     }
 
-    let storage_dir = storage_path.parent().unwrap();
+    let storage_dir = storage_path
+        .parent()
+        .expect("blob path must have a parent direcory");
     std::fs::create_dir_all(storage_dir)?;
     let mut temp_storage_file = tempfile::NamedTempFile::new_in(storage_dir)?;
 
@@ -66,12 +69,8 @@ pub fn reassemble_chunks(
         std::io::copy(&mut chunk_file, &mut temp_storage_file)?;
     }
 
-    let actual_hash = hash_file(&temp_storage_file.path())?;
+    let actual_hash = hash_file(temp_storage_file.path())?;
     if actual_hash != expected_hash {
-        let res = std::fs::remove_file(&temp_storage_file);
-        if let Err(err) = res {
-            tracing::error!("failed to remove temporary file: {}", err)
-        }
         anyhow::bail!("unexpected hash mismatch after writing");
     }
 
@@ -203,10 +202,6 @@ mod test {
         assert!(result.is_err());
         // And: no blob should be left lying around at the wrong-hash path.
         let leaked = get_storage_path(dir.path(), "test", &wrong_hash);
-        // The file was created during the write attempt; this documents that
-        // failure leaves a corrupt blob behind. If we ever clean up on error,
-        // flip this assertion. Not doing it now because the storage path is
-        // keyed by the hash that DIDN'T match, so nothing else will look it up.
         assert!(!leaked.exists());
     }
 

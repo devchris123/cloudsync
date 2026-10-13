@@ -33,6 +33,9 @@ use crate::{
 use super::db;
 use super::storage;
 
+const MAX_CHUNK_SIZE: usize = 5 * 1024 * 1024;
+const MAX_CHUNK_COUNT: u64 = 10_000;
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<Database>,
@@ -47,6 +50,7 @@ pub struct AppState {
     /// because they serve different roles (validate incoming tokens vs.
     /// talk to the IdP); see `oidc::OidcClient` for the rationale.
     pub oidc_client: Option<OidcClient>,
+    pub max_upload_file_size: u64,
 }
 
 struct AppError(anyhow::Error, StatusCode);
@@ -175,6 +179,7 @@ async fn create_upload(
     extract::Json(body): extract::Json<InitUploadRequest>,
 ) -> Result<Json<InitUploadResponse>, AppError> {
     let db = TenantUploadDb::new(state.db, ctx);
+    validate_upload_request_body(&body, state.max_upload_file_size)?;
     let upload = db.create(body)?;
     let staging_dir = std::path::Path::new(&state.staging_dir).join(&upload.upload_id);
     std::fs::create_dir_all(staging_dir)?;
@@ -183,9 +188,56 @@ async fn create_upload(
     }))
 }
 
+fn validate_upload_request_body(
+    body: &InitUploadRequest,
+    max_upload_file_size: u64,
+) -> Result<(), AppError> {
+    if body.total_hash.len() != storage::HASH_SIZE {
+        return Err(AppError(
+            anyhow::anyhow!("total hash must be exactly 64 character"),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    if !body
+        .total_hash
+        .bytes()
+        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(AppError(
+            anyhow::anyhow!(
+                "total_hash must contain only lowercase hexadecimal characters (0-9, a-f)"
+            ),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    if body.total_size > max_upload_file_size {
+        let gib = max_upload_file_size / (1024_u64 * 1024 * 1024);
+        return Err(AppError(
+            anyhow::anyhow!("total size must be smaller than or equal to {} GiB", gib),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    if body.chunk_count > MAX_CHUNK_COUNT {
+        return Err(AppError(
+            anyhow::anyhow!(
+                "chunk count must be smaller than or equal to {}",
+                MAX_CHUNK_COUNT
+            ),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    if body.chunk_count == 0 {
+        return Err(AppError(
+            anyhow::anyhow!("chunk count must be greater than 0"),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    Ok(())
+}
+
 async fn replace_chunk(
     State(state): State<AppState>,
-    extract::Path((upload_id, index)): Path<(String, u32)>,
+    extract::Path((upload_id, index)): Path<(String, u64)>,
     ctx: UserContext,
     body: body::Bytes,
 ) -> Result<Json<ReplaceChunkResponse>, AppError> {
@@ -197,7 +249,7 @@ async fn replace_chunk(
             StatusCode::NOT_FOUND,
         ));
     };
-    if index >= upload.chunk_count as u32 {
+    if index >= upload.chunk_count {
         return Err(AppError(
             anyhow::anyhow!("index larger than upload chunk_count"),
             StatusCode::BAD_REQUEST,
@@ -417,7 +469,7 @@ pub fn create_app(state: AppState) -> Router {
             state.clone(),
             bearer_auth_layer,
         ))
-        .layer(DefaultBodyLimit::max(5 * 1024 * 1024)); // 4MB + overhead
+        .layer(DefaultBodyLimit::max(MAX_CHUNK_SIZE)); // 4MB + overhead
 
     // Cookie-auth-only HTML fragment routes for HTMX swaps.
     let partials_router = Router::<AppState>::new()
@@ -490,6 +542,7 @@ pub fn bootstrap_app(config: ServerConfig) -> anyhow::Result<Router> {
         default_user_id: config.default_user_id,
         oidc,
         oidc_client,
+        max_upload_file_size: config.max_upload_file_size,
     };
     let app = create_app(state);
     Ok(app)
@@ -497,6 +550,8 @@ pub fn bootstrap_app(config: ServerConfig) -> anyhow::Result<Router> {
 
 #[cfg(test)]
 mod tests {
+    use cloudsync_common::hash_bytes;
+
     use super::*;
 
     #[tokio::test]
@@ -520,6 +575,68 @@ mod tests {
             let result = UserContext::from_request_parts(&mut parts, &()).await;
 
             assert!(matches!(result, Err(StatusCode::UNAUTHORIZED)));
+        }
+    }
+
+    #[test]
+    fn test_validate_upload_request_body() {
+        let max_file_size = 100_u64;
+        let valid_hash = hash_bytes(b"example");
+        let cases = [
+            ("valid request", valid_hash.clone(), 2, 1, true),
+            ("short hash", "a".repeat(63), 2, 1, false),
+            ("long hash", "a".repeat(65), 2, 1, false),
+            (
+                "invalid hash character",
+                format!("{}g", "a".repeat(63)),
+                2,
+                1,
+                false,
+            ),
+            ("size at limit", valid_hash.clone(), max_file_size, 1, true),
+            (
+                "size above limit",
+                valid_hash.clone(),
+                max_file_size + 1,
+                1,
+                false,
+            ),
+            ("zero chunks", valid_hash.clone(), 2, 0, false),
+            (
+                "chunk count at limit",
+                valid_hash.clone(),
+                2,
+                MAX_CHUNK_COUNT,
+                true,
+            ),
+            (
+                "chunk count above limit",
+                valid_hash,
+                2,
+                MAX_CHUNK_COUNT + 1,
+                false,
+            ),
+        ];
+
+        for (name, total_hash, total_size, chunk_count, should_accept) in cases {
+            let request = InitUploadRequest {
+                path: "example".to_string(),
+                total_size,
+                total_hash,
+                chunk_count,
+            };
+            let result = validate_upload_request_body(&request, max_file_size);
+
+            if should_accept {
+                if let Err(err) = result {
+                    panic!("{name}: expected acceptance, got {} ({})", err.0, err.1);
+                }
+            } else {
+                assert!(
+                    matches!(result, Err(AppError(_, StatusCode::BAD_REQUEST))),
+                    "{name}: expected BAD_REQUEST",
+                );
+            }
         }
     }
 }

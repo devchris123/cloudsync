@@ -104,7 +104,7 @@ async fn push_single_file_chunked(
         return Ok(());
     }
     let mut upload_id: Option<String> = None;
-    let mut chunks_received: Vec<u32> = vec![];
+    let mut chunks_received: Vec<u64> = vec![];
     let mut chunk_count = chunk_count;
 
     if let Some(sr) = &mut sync_record
@@ -151,7 +151,7 @@ async fn resume_upload(
     sync_client: &impl SyncApi,
     mut sync_record: Option<&mut SyncRecord>,
     local_path: &Path,
-    chunks_received: Vec<u32>,
+    chunks_received: Vec<u64>,
     chunk_count: u64,
     rel_path: String,
     hash: String,
@@ -177,13 +177,13 @@ async fn resume_upload(
         .unwrap_or(5);
     let mut join_set = vec![];
 
-    let chunks_received: std::collections::HashSet<u32> = chunks_received.into_iter().collect();
+    let chunks_received: std::collections::HashSet<u64> = chunks_received.into_iter().collect();
     let on_progress = on_file_start(&rel_path, chunk_count, chunks_received.len() as u64);
     for idx in 0..chunk_count {
         let mut buf = Vec::new();
         (&mut file).take(CHUNK_SIZE).read_to_end(&mut buf)?;
         // Do the skip after reading file, so the file pointer correctly advances for the next read.
-        if chunks_received.contains(&(idx as u32)) {
+        if chunks_received.contains(&idx) {
             continue;
         }
         let fut = sync_client.send_chunk(upload_id, idx as u32, buf);
