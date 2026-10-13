@@ -10,7 +10,7 @@ pub struct Upload {
     pub upload_id: String,
     pub total_hash: String,
     pub chunk_count: u64,
-    pub chunks_received: Vec<u32>,
+    pub chunks_received: Vec<u64>,
     pub created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
     #[serde(default)]
@@ -34,7 +34,7 @@ pub struct InitUploadResponse {
 
 #[derive(Serialize, Deserialize)]
 pub struct ReplaceChunkResponse {
-    pub chunk_index: u32,
+    pub chunk_index: u64,
 }
 
 #[derive(Serialize, Deserialize)]

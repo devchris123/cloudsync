@@ -15,4 +15,5 @@ pub struct ServerConfig {
     pub default_tenant_id: String,
     pub default_user_id: String,
     pub oidc_config: Option<OidcConfig>,
+    pub max_upload_file_size: u64,
 }

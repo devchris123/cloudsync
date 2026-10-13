@@ -111,6 +111,7 @@ fn create_config(args: cli::Args) -> config::ServerConfig {
             }),
             _ => None,
         },
+        max_upload_file_size: args.max_upload_file_size,
     }
 }
 
@@ -133,6 +134,7 @@ mod tests {
             oidc_discovery_url: None,
             oidc_audience: Some("cloudsync".to_string()),
             oidc_client_id: None,
+            max_upload_file_size: 100,
         };
 
         let config = create_config(args);
@@ -166,6 +168,7 @@ mod tests {
             oidc_discovery_url: Some("http://keycloak:8080/realms/cloudsync".to_string()),
             oidc_audience: Some("cloudsync".to_string()),
             oidc_client_id: None,
+            max_upload_file_size: 100,
         };
 
         let config = create_config(args);
@@ -200,6 +203,7 @@ mod tests {
             oidc_discovery_url: None,
             oidc_audience: Some("cloudsync-api".to_string()),
             oidc_client_id: Some("cloudsync-web".to_string()),
+            max_upload_file_size: 100,
         };
 
         let config = create_config(args);

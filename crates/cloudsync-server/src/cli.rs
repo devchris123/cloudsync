@@ -63,4 +63,12 @@ pub struct Args {
         help = "OAuth client_id used by web UI + advertised to the CLI via /auth/info. Defaults to oidc_audience if unset."
     )]
     pub oidc_client_id: Option<String>,
+
+    #[arg(
+        long,
+        env = "CLOUDSYNC_MAX_UPLOAD_FILE_SIZE",
+        help = "Maximum allowed file size for clients to upload",
+        default_value_t = 10 * 1024 * 1024 * 1024 // 10GiB
+    )]
+    pub max_upload_file_size: u64,
 }
