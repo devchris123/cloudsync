@@ -1,37 +1,38 @@
 use clap::Parser;
+use cloudsync_server::config;
 
 #[derive(Parser)]
 pub struct Args {
-    #[arg(long, env = "CLOUDSYNC_HOST", default_value = "127.0.0.1")]
+    #[arg(long, env = "CLOUDSYNC_HOST", default_value = config::DEFAULT_HOST)]
     pub host: String,
-    #[arg(long, env = "CLOUDSYNC_PORT", default_value = "3050")]
+    #[arg(long, env = "CLOUDSYNC_PORT", default_value_t = config::DEFAULT_PORT)]
     pub port: u16,
     #[arg(long, env = "CLOUDSYNC_TOKEN")]
     pub token: String,
     #[arg(
         long,
         env = "CLOUDSYNC_STORAGE_DIR",
-        default_value = "cloudsync/data/files"
+        default_value = config::DEFAULT_STORAGE_DIR
     )]
     pub storage_dir: String,
     #[arg(
         long,
         env = "CLOUDSYNC_STAGING_DIR",
-        default_value = "cloudsync/data/staging"
+        default_value = config::DEFAULT_STAGING_DIR
     )]
     pub staging_dir: String,
-    #[arg(long, env = "CLOUDSYNC_DBNAME", default_value = "data.redb")]
+    #[arg(long, env = "CLOUDSYNC_DBNAME", default_value = config::DEFAULT_DBNAME)]
     pub dbname: String,
     #[arg(
         long,
         env = "CLOUDSYNC_DEFAULT_TENANT_ID",
-        default_value = "default-tenant"
+        default_value = config::DEFAULT_TENANT_ID
     )]
     pub default_tenant_id: String,
     #[arg(
         long,
         env = "CLOUDSYNC_DEFAULT_USER_ID",
-        default_value = "default-user"
+        default_value = config::DEFAULT_USER_ID
     )]
     pub default_user_id: String,
 
@@ -53,7 +54,7 @@ pub struct Args {
         long,
         env = "CLOUDSYNC_OIDC_AUDIENCE",
         help = "Expected `aud` claim on incoming JWTs (the resource server identifier)",
-        default_value = "cloudsync"
+        default_value = config::DEFAULT_OIDC_AUDIENCE
     )]
     pub oidc_audience: Option<String>,
 

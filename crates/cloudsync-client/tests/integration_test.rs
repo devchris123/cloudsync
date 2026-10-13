@@ -31,16 +31,13 @@ async fn test_push_and_pull() {
         .unwrap()
         .to_string();
     let server = cloudsync_server::app::bootstrap_app(ServerConfig {
-        host: "127.0.0.1".to_string(),
         port: 0,
         storage_dir: storage_dir_str,
         staging_dir: staging_dir_str,
-        token: token.to_string(),
         dbname: dbname.to_string(),
         default_tenant_id: "tenant".to_string(),
         default_user_id: "user".to_string(),
-        oidc_config: None,
-        max_upload_file_size: 10 * 1024 * 1024 * 1024,
+        ..ServerConfig::new(token.to_string())
     })
     .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -115,16 +112,13 @@ async fn test_pull_conflict() {
         .unwrap()
         .to_string();
     let server = cloudsync_server::app::bootstrap_app(ServerConfig {
-        host: "127.0.0.1".to_string(),
         port: 0,
         storage_dir: storage_dir_str,
         staging_dir: staging_dir_str,
-        token: token.to_string(),
         dbname: dbname.to_string(),
         default_tenant_id: "tenant".to_string(),
         default_user_id: "user".to_string(),
-        oidc_config: None,
-        max_upload_file_size: 10 * 1024 * 1024 * 1024,
+        ..ServerConfig::new(token.to_string())
     })
     .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
