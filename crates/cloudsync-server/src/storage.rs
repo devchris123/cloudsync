@@ -2,6 +2,55 @@ use cloudsync_common::{hash_bytes, hash_file};
 
 pub const HASH_SIZE: usize = 64;
 
+#[derive(Debug)]
+pub enum StorageError {
+    //// The hash of the reassembled file does not match the expected hash.
+    HashMismatch,
+
+    //// The size of the reassembled file does not match the expected size.
+    SizeMismatch,
+
+    //// An I/O error occurred while reading or writing files.
+    Io(std::io::Error),
+
+    //// An unexpected "unhandled" internal error occurred.
+    Internal(anyhow::Error),
+}
+
+impl std::fmt::Display for StorageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StorageError::HashMismatch => write!(f, "hash mismatch"),
+            StorageError::SizeMismatch => write!(f, "size mismatch"),
+            StorageError::Io(err) => write!(f, "io error: {}", err),
+            StorageError::Internal(err) => write!(f, "internal error: {}", err),
+        }
+    }
+}
+
+impl From<anyhow::Error> for StorageError {
+    fn from(err: anyhow::Error) -> Self {
+        StorageError::Internal(err)
+    }
+}
+
+impl From<std::io::Error> for StorageError {
+    fn from(err: std::io::Error) -> Self {
+        StorageError::Io(err)
+    }
+}
+
+impl From<tempfile::PersistError> for StorageError {
+    fn from(err: tempfile::PersistError) -> Self {
+        StorageError::Io(err.error)
+    }
+}
+
+/// Writes the given content to a file in the storage directory for the given namespace.
+/// The file is named by the SHA-256 hash of the content, and the directory structure is
+/// derived from the namespace and the first two characters of the hash.
+///
+/// Returns the SHA-256 hash of the content.
 pub fn write(
     data_dir: &std::path::Path,
     namespace: &str,
@@ -15,6 +64,7 @@ pub fn write(
     Ok(content_hash)
 }
 
+/// Returns the path to the file in the storage directory for the given namespace and content hash.
 pub fn get_storage_path(
     data_dir: &std::path::Path,
     namespace: &str,
@@ -23,6 +73,14 @@ pub fn get_storage_path(
     get_storage_dir(data_dir, namespace, total_hash).join(total_hash)
 }
 
+/// Returns true if the file exists in the storage directory for the given namespace and content hash.
+pub fn exist_storage_path(data_dir: &std::path::Path, namespace: &str, total_hash: &str) -> bool {
+    get_storage_dir(data_dir, namespace, total_hash)
+        .join(total_hash)
+        .exists()
+}
+
+/// Returns the path to the storage directory for the given namespace and content hash.
 fn get_storage_dir(
     data_dir: &std::path::Path,
     namespace: &str,
@@ -32,29 +90,22 @@ fn get_storage_dir(
     data_dir.join(namespace_hash).join(&total_hash[0..2])
 }
 
-/// Concatenate chunk files `0`, `1`, … `chunk_count-1` from `staging_dir` into
-/// the content-addressed blob path derived from `expected_hash`.
+/// Reassembles the chunks of a file upload into a single file in the storage directory for the given namespace.
+/// The chunks are expected to be in the staging directory, named by their index (0, 1, 2, ...).
 ///
-/// Skips the write entirely if the blob already exists — under content-
-/// addressable storage the bytes at the hash-derived path ARE the answer, so a
-/// re-upload of the same content is a no-op. Without this guard the previous
-/// `.append(true)` code path doubled the blob on every re-upload (after a
-/// soft-delete, or just a duplicate push) and the hash-check below caught it
-/// as a 500 — see commit f9c490e.
-///
-/// After writing, the resulting file is re-hashed and compared to
-/// `expected_hash`. A mismatch indicates a storage-layer bug and is surfaced
-/// at the point of corruption rather than left to rot.
+/// The function checks that the total size of the reassembled file matches the expected size,
+/// and that the hash of the reassembled file matches the expected hash.
 pub fn reassemble_chunks(
     data_dir: &std::path::Path,
     namespace: &str,
     staging_dir: &std::path::Path,
     chunk_count: u64,
     expected_hash: &str,
-) -> anyhow::Result<std::path::PathBuf> {
+    total_size: u64,
+) -> Result<(std::path::PathBuf, u64), StorageError> {
     let storage_path = get_storage_path(data_dir, namespace, expected_hash);
     if storage_path.exists() {
-        return Ok(storage_path);
+        return Ok((storage_path, 0));
     }
 
     let storage_dir = storage_path
@@ -63,24 +114,36 @@ pub fn reassemble_chunks(
     std::fs::create_dir_all(storage_dir)?;
     let mut temp_storage_file = tempfile::NamedTempFile::new_in(storage_dir)?;
 
+    let mut seen_bytes: u64 = 0;
     for chunk_index in 0..chunk_count {
         let chunk_path = staging_dir.join(chunk_index.to_string());
         let mut chunk_file = std::fs::File::open(chunk_path)?;
-        std::io::copy(&mut chunk_file, &mut temp_storage_file)?;
+        let copied_bytes = std::io::copy(&mut chunk_file, &mut temp_storage_file)?;
+        seen_bytes += copied_bytes;
+    }
+    if seen_bytes != total_size {
+        tracing::warn!(
+            "reassemble_chunks: expected {} bytes, but wrote {} bytes",
+            total_size,
+            seen_bytes
+        );
+        return Err(StorageError::SizeMismatch);
     }
 
     let actual_hash = hash_file(temp_storage_file.path())?;
     if actual_hash != expected_hash {
-        anyhow::bail!("unexpected hash mismatch after writing");
+        return Err(StorageError::HashMismatch);
     }
 
     temp_storage_file.persist(&storage_path)?;
 
-    Ok(storage_path)
+    Ok((storage_path, seen_bytes))
 }
 
 #[cfg(test)]
 mod test {
+    use crate::storage;
+
     use super::*;
     use tempfile::TempDir;
     use tokio::io::AsyncReadExt;
@@ -161,7 +224,7 @@ mod test {
         write_chunks(&staging, &[b"abc", b"def"]);
         let hash = hash_bytes(b"abcdef");
 
-        let path = reassemble_chunks(dir, "test", &staging, 2, &hash).unwrap();
+        let (path, _) = reassemble_chunks(dir, "test", &staging, 2, &hash, 6).unwrap();
 
         assert_eq!(std::fs::read(path).unwrap(), b"abcdef");
     }
@@ -178,13 +241,15 @@ mod test {
         write_chunks(&staging1, &[b"abcdef"]);
         let hash = hash_bytes(b"abcdef");
 
-        let storage_path = reassemble_chunks(data_dir, "test", &staging1, 1, &hash).unwrap();
+        let (storage_path, _) =
+            reassemble_chunks(data_dir, "test", &staging1, 1, &hash, 6).unwrap();
         assert_eq!(std::fs::read(&storage_path).unwrap(), b"abcdef");
 
         let staging2 = dir.path().join("staging-2");
         write_chunks(&staging2, &[b"XXXXXX"]);
 
-        let storage_path2 = reassemble_chunks(data_dir, "test", &staging2, 1, &hash).unwrap();
+        let (storage_path2, _) =
+            reassemble_chunks(data_dir, "test", &staging2, 1, &hash, 6).unwrap();
 
         assert_eq!(storage_path2, storage_path);
         assert_eq!(std::fs::read(&storage_path).unwrap(), b"abcdef");
@@ -197,7 +262,7 @@ mod test {
         write_chunks(&staging, &[b"abc"]);
         let wrong_hash = hash_bytes(b"not-abc");
 
-        let result = reassemble_chunks(dir.path(), "test", &staging, 1, &wrong_hash);
+        let result = reassemble_chunks(dir.path(), "test", &staging, 1, &wrong_hash, 3);
 
         assert!(result.is_err());
         // And: no blob should be left lying around at the wrong-hash path.
@@ -210,5 +275,18 @@ mod test {
         for (i, c) in chunks.iter().enumerate() {
             std::fs::write(staging.join(i.to_string()), c).unwrap();
         }
+    }
+
+    #[test]
+    fn test_exist_storage_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let content = b"test";
+        let content_hash = hash_bytes(content);
+
+        storage::write(dir.path(), "test", content).unwrap();
+
+        let exist = storage::exist_storage_path(dir.path(), "test", &content_hash);
+
+        assert!(exist);
     }
 }

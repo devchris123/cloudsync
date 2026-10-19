@@ -24,10 +24,10 @@ use redb::Database;
 use crate::{
     auth::UserContext,
     config::ServerConfig,
-    db::TenantDb,
     db_upload::TenantUploadDb,
     migrations,
     oidc::{Claims, OidcClient, OidcValidator},
+    service,
 };
 
 use super::db;
@@ -44,6 +44,7 @@ pub struct AppState {
     pub token: String,
     pub default_tenant_id: String,
     pub default_user_id: String,
+    pub default_user_quota_bytes: u64,
     pub oidc: Option<Arc<OidcValidator>>,
     /// OAuth-client-role config. Always `Some` when `oidc` is `Some` —
     /// they're populated together at bootstrap. The two stay separate
@@ -61,6 +62,33 @@ impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
         tracing::error!("{}", self.0);
         (self.1, self.0.to_string()).into_response()
+    }
+}
+
+impl From<service::ServiceError> for AppError {
+    fn from(error: service::ServiceError) -> Self {
+        match error {
+            service::ServiceError::QuotaExceeded => {
+                AppError(anyhow::anyhow!("quota exceeded"), StatusCode::FORBIDDEN)
+            }
+            service::ServiceError::Internal(err) => {
+                AppError(err, StatusCode::INTERNAL_SERVER_ERROR)
+            }
+            service::ServiceError::NotFound => {
+                AppError(anyhow::anyhow!("not found"), StatusCode::NOT_FOUND)
+            }
+            service::ServiceError::Validation(msg) => {
+                AppError(anyhow::anyhow!(msg), StatusCode::BAD_REQUEST)
+            }
+            service::ServiceError::HashMismatch(_err) => AppError(
+                anyhow::anyhow!("uploaded content does not match the declared hash".to_string()),
+                StatusCode::BAD_REQUEST,
+            ),
+            service::ServiceError::Storage(_err) => AppError(
+                anyhow::anyhow!("internal error"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        }
     }
 }
 
@@ -95,8 +123,14 @@ async fn list_files(
     ctx: UserContext,
 ) -> Result<Json<ListFilesResponse>, AppError> {
     tracing::debug!(tenant_id = %ctx.tenant_id, user_id = %ctx.user_id, "list_files");
-    let db = TenantDb::new(state.db, ctx);
-    let files = db.list()?;
+    let files = service::TenantFileService::new(
+        state.db,
+        ctx,
+        state.storage_dir,
+        state.staging_dir,
+        state.default_user_quota_bytes,
+    )
+    .list_files()?;
     Ok(Json(ListFilesResponse { files }))
 }
 
@@ -118,11 +152,24 @@ async fn post_file(
     let path = path.unwrap();
     let content = content.unwrap();
 
-    let content_hash: String = storage::write(&state.storage_dir, &ctx.tenant_id, &content)?;
-    tracing::info!("file stored: {} (hash: {})", path, content_hash);
-    let db = TenantDb::new(state.db, ctx);
-    let file_meta = db.put(&path, content.len() as u64, &content_hash)?;
-    tracing::info!("metadata saved: {} (version: {})", path, file_meta.version);
+    let file_meta = service::TenantFileService::new(
+        state.db,
+        ctx.clone(),
+        state.storage_dir,
+        state.staging_dir,
+        state.default_user_quota_bytes,
+    )
+    .create_file(path, &content)
+    .inspect_err(|err| match err {
+        service::ServiceError::QuotaExceeded
+        | service::ServiceError::HashMismatch(_)
+        | service::ServiceError::Validation(_) => {
+            tracing::info!(tenant_id = &ctx.tenant_id, "failed to upload file: {}", err)
+        }
+        _ => {
+            tracing::error!(tenant_id = &ctx.tenant_id, "failed to upload file: {}", err)
+        }
+    })?;
 
     Ok(Json(CreateFileResponse { file: file_meta }))
 }
@@ -134,9 +181,14 @@ async fn delete_file(
     ctx: UserContext,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, AppError> {
-    let db = TenantDb::new(state.db, ctx);
-    db.delete(&path)?;
-    tracing::info!("file marked as deleted: {}", path);
+    service::TenantFileService::new(
+        state.db,
+        ctx,
+        state.storage_dir,
+        state.staging_dir,
+        state.default_user_quota_bytes,
+    )
+    .delete_file(&path)?;
     // HTMX swaps `outerHTML` of the row; an empty 200 makes the row disappear.
     // Non-HTMX (CLI / API) callers keep getting the structured JSON response.
     if headers.get("HX-Request").is_some() {
@@ -153,15 +205,14 @@ async fn get_file(
     request: Request,
 ) -> Result<impl IntoResponse, AppError> {
     let tenant_id = ctx.tenant_id.clone();
-    let db = TenantDb::new(state.db, ctx);
-    let file_meta = db.get(&path)?;
-    let Some(file_meta) = file_meta else {
-        tracing::warn!("metadata not found: {}", path);
-        return Err(AppError(
-            anyhow::anyhow!("not found"),
-            StatusCode::NOT_FOUND,
-        ));
-    };
+    let file_meta = service::TenantFileService::new(
+        state.db,
+        ctx,
+        state.storage_dir.clone(),
+        state.staging_dir,
+        state.default_user_quota_bytes,
+    )
+    .get_file(&path)?;
     tracing::debug!(
         "metadata retrieved: {} (version: {})",
         path,
@@ -178,13 +229,17 @@ async fn create_upload(
     ctx: UserContext,
     extract::Json(body): extract::Json<InitUploadRequest>,
 ) -> Result<Json<InitUploadResponse>, AppError> {
-    let db = TenantUploadDb::new(state.db, ctx);
     validate_upload_request_body(&body, state.max_upload_file_size)?;
-    let upload = db.create(body)?;
-    let staging_dir = std::path::Path::new(&state.staging_dir).join(&upload.upload_id);
-    std::fs::create_dir_all(staging_dir)?;
+    let upload_id = service::TenantFileService::new(
+        state.db,
+        ctx,
+        state.storage_dir,
+        state.staging_dir,
+        state.default_user_quota_bytes,
+    )
+    .create_upload(body)?;
     Ok(Json(InitUploadResponse {
-        upload_id: upload.upload_id,
+        upload_id: upload_id,
     }))
 }
 
@@ -241,24 +296,14 @@ async fn replace_chunk(
     ctx: UserContext,
     body: body::Bytes,
 ) -> Result<Json<ReplaceChunkResponse>, AppError> {
-    let db = TenantUploadDb::new(state.db, ctx);
-    let upload = db.get(&upload_id)?;
-    let Some(upload) = upload else {
-        return Err(AppError(
-            anyhow::anyhow!("upload not found"),
-            StatusCode::NOT_FOUND,
-        ));
-    };
-    if index >= upload.chunk_count {
-        return Err(AppError(
-            anyhow::anyhow!("index larger than upload chunk_count"),
-            StatusCode::BAD_REQUEST,
-        ));
-    }
-    let staging_dir = std::path::Path::new(&state.staging_dir).join(&upload_id);
-    let chunk_path = staging_dir.join(index.to_string());
-    std::fs::write(chunk_path, body)?;
-    db.add_chunk(&upload_id, index)?;
+    service::TenantFileService::new(
+        state.db,
+        ctx,
+        state.storage_dir,
+        state.staging_dir,
+        state.default_user_quota_bytes,
+    )
+    .replace_chunk(&upload_id, index, body.as_ref())?;
     Ok(Json(ReplaceChunkResponse { chunk_index: index }))
 }
 
@@ -283,35 +328,23 @@ async fn finalize_upload(
     extract::Path(upload_id): Path<String>,
     ctx: UserContext,
 ) -> Result<Json<FinalizeUploadResponse>, AppError> {
-    let upload_db: TenantUploadDb = TenantUploadDb::new(state.db.clone(), ctx.clone());
-    let upload = upload_db.get(&upload_id)?;
-    let Some(upload) = upload else {
-        return Err(AppError(
-            anyhow::anyhow!("not found"),
-            StatusCode::NOT_FOUND,
-        ));
-    };
-    if upload.chunks_received.len() != upload.chunk_count as usize {
-        return Err(AppError(
-            anyhow::anyhow!("bad request"),
-            StatusCode::BAD_REQUEST,
-        ));
-    }
-    let staging_dir = std::path::Path::new(&state.staging_dir).join(&upload_id);
-    storage::reassemble_chunks(
-        &state.storage_dir,
-        ctx.tenant_id.as_str(),
-        &staging_dir,
-        upload.chunk_count,
-        &upload.total_hash,
-    )?;
-    // `db.put` overwrites any prior row at this path — including a soft-deleted
-    // one — bumping `version` and resetting `is_deleted`, so the re-upload of a
-    // previously-deleted file lands as a fresh row without special-casing here.
-    let db = TenantDb::new(state.db, ctx);
-    let file = db.put(&upload.path, upload.total_size, &upload.total_hash)?;
-    upload_db.delete(&upload_id)?;
-    std::fs::remove_dir_all(staging_dir)?;
+    let file = service::TenantFileService::new(
+        state.db,
+        ctx.clone(),
+        state.storage_dir,
+        state.staging_dir,
+        state.default_user_quota_bytes,
+    )
+    .finalize_upload(&upload_id)
+    .inspect_err(|err| {
+        if matches!(&err, service::ServiceError::HashMismatch(..)) {
+            tracing::info!(
+                upload_id,
+                tenant_id = ctx.tenant_id,
+                "upload rejected: content hash mismatch"
+            )
+        }
+    })?;
     Ok(Json(FinalizeUploadResponse { file }))
 }
 
@@ -540,6 +573,7 @@ pub fn bootstrap_app(config: ServerConfig) -> anyhow::Result<Router> {
         token: config.token,
         default_tenant_id: config.default_tenant_id,
         default_user_id: config.default_user_id,
+        default_user_quota_bytes: config.default_user_quota_bytes,
         oidc,
         oidc_client,
         max_upload_file_size: config.max_upload_file_size,
