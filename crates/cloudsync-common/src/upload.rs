@@ -19,7 +19,7 @@ pub struct Upload {
     pub user_id: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct InitUploadRequest {
     pub path: String,
     pub total_size: u64,

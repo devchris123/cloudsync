@@ -20,19 +20,64 @@ impl TenantUploadDb {
     pub fn get(&self, upload_id: &str) -> Result<Option<Upload>, anyhow::Error> {
         let tx = self.db.begin_read()?;
         let table = tx.open_table(TABLE_UPLOADS)?;
+        self.get_from_table(&table, upload_id)
+    }
+
+    pub fn get_write_tx(
+        &self,
+        tx: &redb::WriteTransaction,
+        upload_id: &str,
+    ) -> anyhow::Result<Option<Upload>> {
+        let table = tx.open_table(TABLE_UPLOADS)?;
+        self.get_from_table(&table, upload_id)
+    }
+
+    fn get_from_table(
+        &self,
+        table: &impl ReadableTable<&'static str, &'static [u8]>,
+        upload_id: &str,
+    ) -> Result<Option<Upload>, anyhow::Error> {
         let entry = table.get(upload_id)?;
         let Some(entry) = entry else {
             return Ok(None);
         };
         let bytes = entry.value();
-        let file_meta = serde_json::from_slice::<Upload>(bytes)?;
-        if file_meta.tenant_id != self.user_context.tenant_id {
+        let upload = serde_json::from_slice::<Upload>(bytes)?;
+        if upload.tenant_id != self.user_context.tenant_id {
             return Ok(None);
         }
-        Ok(Some(file_meta))
+        Ok(Some(upload))
+    }
+
+    pub fn list_tx(&self, tx: &redb::WriteTransaction) -> Result<Vec<Upload>, anyhow::Error> {
+        let table = tx.open_table(TABLE_UPLOADS)?;
+        let mut uploads = vec![];
+
+        for entry in table.iter()? {
+            let (_key, val) = entry?;
+            let bytes = val.value();
+            let upload = serde_json::from_slice::<Upload>(bytes)?;
+            if upload.tenant_id != self.user_context.tenant_id {
+                continue;
+            }
+            uploads.push(upload);
+        }
+
+        Ok(uploads)
     }
 
     pub fn create(&self, upload_request: InitUploadRequest) -> anyhow::Result<Upload> {
+        let tx: redb::WriteTransaction = self.db.begin_write()?;
+        let upload = self.create_tx(&tx, upload_request)?;
+        tx.commit()?;
+        Ok(upload)
+    }
+
+    pub fn create_tx(
+        &self,
+        tx: &redb::WriteTransaction,
+        upload_request: InitUploadRequest,
+    ) -> anyhow::Result<Upload> {
         let upload_id = nanoid::nanoid!();
         let upload = Upload {
             upload_id: upload_id.clone(),
@@ -46,14 +91,12 @@ impl TenantUploadDb {
             tenant_id: self.user_context.tenant_id.clone(),
             user_id: self.user_context.user_id.clone(),
         };
-
-        let tx = self.db.begin_write()?;
         {
             let mut table = tx.open_table(TABLE_UPLOADS)?;
             let bytes = serde_json::to_vec(&upload)?;
             table.insert(upload_id.as_str(), bytes.as_slice())?;
         }
-        tx.commit()?;
+
         Ok(upload)
     }
 
@@ -94,25 +137,28 @@ impl TenantUploadDb {
 
     pub fn delete(&self, upload_id: &str) -> anyhow::Result<()> {
         let tx = self.db.begin_write()?;
-        {
-            let mut table = tx.open_table(TABLE_UPLOADS)?;
-
-            let is_owned = {
-                let entry: Option<redb::AccessGuard<'_, &[u8]>> = table.get(upload_id)?;
-                if let Some(entry) = entry {
-                    let bytes = entry.value();
-                    let file_meta = serde_json::from_slice::<Upload>(bytes)?;
-                    file_meta.tenant_id == self.user_context.tenant_id
-                } else {
-                    return Ok(());
-                }
-            };
-            if !is_owned {
-                anyhow::bail!("upload not found: {}", upload_id);
-            }
-            table.remove(upload_id)?;
-        }
+        self.delete_tx(&tx, upload_id)?;
         tx.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_tx(&self, tx: &redb::WriteTransaction, upload_id: &str) -> anyhow::Result<()> {
+        let mut table = tx.open_table(TABLE_UPLOADS)?;
+
+        let is_owned = {
+            let entry: Option<redb::AccessGuard<'_, &[u8]>> = table.get(upload_id)?;
+            if let Some(entry) = entry {
+                let bytes = entry.value();
+                let file_meta = serde_json::from_slice::<Upload>(bytes)?;
+                file_meta.tenant_id == self.user_context.tenant_id
+            } else {
+                return Ok(());
+            }
+        };
+        if !is_owned {
+            anyhow::bail!("upload not found: {}", upload_id);
+        }
+        table.remove(upload_id)?;
         Ok(())
     }
 }

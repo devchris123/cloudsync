@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use cloudsync_common::FileMeta;
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableTable, Table, TableDefinition};
 
 use crate::{auth::UserContext, db_upload::TABLE_UPLOADS};
 
@@ -59,6 +59,14 @@ impl TenantDb {
     pub fn get(&self, path: &str) -> Result<Option<FileMeta>, anyhow::Error> {
         let tx = self.db.begin_read()?;
         let table = tx.open_table(TABLE_FILES)?;
+        self.get_table(&table, path)
+    }
+
+    fn get_table(
+        &self,
+        table: &impl ReadableTable<&'static str, &'static [u8]>,
+        path: &str,
+    ) -> anyhow::Result<Option<FileMeta>> {
         let keyed_path = self.make_key(path);
         let entry = table.get(keyed_path.as_str())?;
         let Some(entry) = entry else {
@@ -70,11 +78,36 @@ impl TenantDb {
     }
 
     pub fn put(&self, path: &str, size: u64, content_hash: &str) -> anyhow::Result<FileMeta> {
-        let tx = self.db.begin_read()?;
-        let table = tx.open_table(TABLE_FILES)?;
-        let keyed_path = self.make_key(path);
-        let entry = table.get(keyed_path.as_str())?;
+        let tx = self.db.begin_write()?;
+        let file_meta = {
+            let mut table = tx.open_table(TABLE_FILES)?;
+            self.put_table(&mut table, path, size, content_hash)?
+        };
+        tx.commit()?;
+        Ok(file_meta)
+    }
 
+    pub fn put_tx(
+        &self,
+        tx: &redb::WriteTransaction,
+        path: &str,
+        size: u64,
+        content_hash: &str,
+    ) -> anyhow::Result<FileMeta> {
+        let file_meta = {
+            let mut table = tx.open_table(TABLE_FILES)?;
+            self.put_table(&mut table, path, size, content_hash)?
+        };
+        Ok(file_meta)
+    }
+
+    fn put_table(
+        &self,
+        table: &mut Table<'_, &'static str, &'static [u8]>,
+        path: &str,
+        size: u64,
+        content_hash: &str,
+    ) -> anyhow::Result<FileMeta> {
         let mut file_meta = FileMeta {
             path: path.to_string(),
             size,
@@ -87,21 +120,22 @@ impl TenantDb {
             user_id: self.user_context.user_id.clone(),
         };
 
-        if let Some(entry) = entry {
-            let bytes = entry.value();
-            let file_meta_raw = serde_json::from_slice::<FileMeta>(bytes)?;
-            file_meta.version = file_meta_raw.version + 1;
-            file_meta.created_at = file_meta_raw.created_at;
-        }
-        drop(table);
-
-        let tx = self.db.begin_write()?;
+        let keyed_path = self.make_key(path);
         {
-            let mut table = tx.open_table(TABLE_FILES)?;
+            let entry = table.get(keyed_path.as_str())?;
+            if let Some(entry) = entry {
+                let bytes = entry.value();
+                let file_meta_raw = serde_json::from_slice::<FileMeta>(bytes)?;
+                file_meta.version = file_meta_raw.version + 1;
+                file_meta.created_at = file_meta_raw.created_at;
+            }
+        }
+
+        {
             let bytes = serde_json::to_vec(&file_meta)?;
             table.insert(keyed_path.as_str(), bytes.as_slice())?;
         }
-        tx.commit()?;
+
         Ok(file_meta)
     }
 
