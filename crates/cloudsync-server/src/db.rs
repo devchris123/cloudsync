@@ -77,6 +77,7 @@ impl TenantDb {
         Ok(Some(file_meta))
     }
 
+    #[cfg(test)]
     pub fn put(&self, path: &str, size: u64, content_hash: &str) -> anyhow::Result<FileMeta> {
         let tx = self.db.begin_write()?;
         let file_meta = {

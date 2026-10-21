@@ -22,6 +22,8 @@ impl TenantUserDb {
     pub fn new(db: Arc<Database>, user_context: UserContext) -> Self {
         TenantUserDb { db, user_context }
     }
+
+    #[cfg(test)]
     pub fn start_read_tx(&self) -> Result<redb::ReadTransaction, anyhow::Error> {
         Ok(self.db.begin_read()?)
     }
@@ -30,6 +32,7 @@ impl TenantUserDb {
         Ok(self.db.begin_write()?)
     }
 
+    #[cfg(test)]
     pub fn get_read_tx(
         &self,
         tx: &redb::ReadTransaction,

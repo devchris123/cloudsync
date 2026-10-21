@@ -66,6 +66,7 @@ impl TenantUploadDb {
         Ok(uploads)
     }
 
+    #[cfg(test)]
     pub fn create(&self, upload_request: InitUploadRequest) -> anyhow::Result<Upload> {
         let tx: redb::WriteTransaction = self.db.begin_write()?;
         let upload = self.create_tx(&tx, upload_request)?;
@@ -135,6 +136,7 @@ impl TenantUploadDb {
         Ok(upload)
     }
 
+    #[cfg(test)]
     pub fn delete(&self, upload_id: &str) -> anyhow::Result<()> {
         let tx = self.db.begin_write()?;
         self.delete_tx(&tx, upload_id)?;

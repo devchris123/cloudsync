@@ -238,9 +238,7 @@ async fn create_upload(
         state.default_user_quota_bytes,
     )
     .create_upload(body)?;
-    Ok(Json(InitUploadResponse {
-        upload_id: upload_id,
-    }))
+    Ok(Json(InitUploadResponse { upload_id }))
 }
 
 fn validate_upload_request_body(
