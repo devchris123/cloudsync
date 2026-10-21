@@ -239,7 +239,7 @@ impl TenantFileService {
         body: &[u8],
     ) -> Result<(), ServiceError> {
         let scoped_db = TenantUploadDb::new(self.db.clone(), self.ctx.clone());
-        let upload = scoped_db.get(&upload_id)?;
+        let upload = scoped_db.get(upload_id)?;
 
         let Some(upload) = upload else {
             return Err(ServiceError::NotFound);
@@ -256,10 +256,10 @@ impl TenantFileService {
                 "index larger than upload chunk_count".to_string(),
             ));
         }
-        let upload_staging_dir = self.staging_dir.join(&upload_id);
+        let upload_staging_dir = self.staging_dir.join(upload_id);
         let chunk_path = upload_staging_dir.join(index.to_string());
         std::fs::write(chunk_path, body)?;
-        scoped_db.add_chunk(&upload_id, index)?;
+        scoped_db.add_chunk(upload_id, index)?;
         Ok(())
     }
 
@@ -293,7 +293,7 @@ impl TenantFileService {
             )));
         }
 
-        let upload_staging_dir = self.staging_dir.join(&upload_id);
+        let upload_staging_dir = self.staging_dir.join(upload_id);
 
         let storage_path = storage::get_storage_path(
             self.storage_dir.as_path(),
@@ -315,9 +315,9 @@ impl TenantFileService {
             let meta = std::fs::metadata(storage_path)?;
             let size = meta.len();
             if size != upload.total_size {
-                return Err(ServiceError::Validation(format!(
-                    "upload total_size must match content size"
-                )));
+                return Err(ServiceError::Validation(
+                    "upload total_size must match content size".to_string(),
+                ));
             }
         }
 
@@ -326,7 +326,7 @@ impl TenantFileService {
         // previously-deleted file lands as a fresh row without special-casing here.
         let scoped_db = TenantDb::new(self.db.clone(), self.ctx.clone());
         let file = scoped_db.put_tx(&tx, &upload.path, upload.total_size, &upload.total_hash)?;
-        upload_db.delete_tx(&tx, &upload_id)?;
+        upload_db.delete_tx(&tx, upload_id)?;
         tx.commit()?;
         if let Err(err) = std::fs::remove_dir_all(upload_staging_dir) {
             tracing::warn!(upload_id, error= %err, "upload finalized but staging cleanup failed");
