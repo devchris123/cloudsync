@@ -248,8 +248,13 @@ pub fn read_session_cookie(token: &str, cookie_header: &str) -> Option<SessionCo
 ///
 /// Trailing slash is stripped so callers can `format!("{}/auth/callback", base)`.
 pub fn derive_base_url(headers: &HeaderMap) -> String {
-    if let Ok(env) = std::env::var("CLOUDSYNC_PUBLIC_BASE_URL") {
-        return env.trim_end_matches('/').to_string();
+    let public_base_url = std::env::var("CLOUDSYNC_PUBLIC_BASE_URL").ok();
+    derive_base_url_with_override(headers, public_base_url.as_deref())
+}
+
+fn derive_base_url_with_override(headers: &HeaderMap, public_base_url: Option<&str>) -> String {
+    if let Some(url) = public_base_url {
+        return url.trim_end_matches('/').to_string();
     }
     let scheme = headers
         .get("x-forwarded-proto")
@@ -681,18 +686,13 @@ mod tests {
     }
 
     #[test]
-    fn derive_base_url_prefers_env_var() {
-        // SAFETY: tests run in one process; env mutation is sequential within a
-        // single #[test] but global. This test does not run in parallel with
-        // anything else that reads CLOUDSYNC_PUBLIC_BASE_URL.
-        unsafe {
-            std::env::set_var("CLOUDSYNC_PUBLIC_BASE_URL", "https://override.example/");
-        }
-        let h = HeaderMap::new();
-        assert_eq!(derive_base_url(&h), "https://override.example");
-        unsafe {
-            std::env::remove_var("CLOUDSYNC_PUBLIC_BASE_URL");
-        }
+    fn derive_base_url_prefers_override() {
+        let mut h = HeaderMap::new();
+        h.insert(header::HOST, HeaderValue::from_static("localhost:3050"));
+        assert_eq!(
+            derive_base_url_with_override(&h, Some("https://override.example/")),
+            "https://override.example"
+        );
     }
 
     #[test]
@@ -703,14 +703,20 @@ mod tests {
             "x-forwarded-host",
             HeaderValue::from_static("cloud.example"),
         );
-        assert_eq!(derive_base_url(&h), "https://cloud.example");
+        assert_eq!(
+            derive_base_url_with_override(&h, None),
+            "https://cloud.example"
+        );
     }
 
     #[test]
     fn derive_base_url_falls_back_to_host_and_http() {
         let mut h = HeaderMap::new();
         h.insert(header::HOST, HeaderValue::from_static("localhost:3050"));
-        assert_eq!(derive_base_url(&h), "http://localhost:3050");
+        assert_eq!(
+            derive_base_url_with_override(&h, None),
+            "http://localhost:3050"
+        );
     }
 
     #[test]
