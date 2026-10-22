@@ -21,11 +21,9 @@ pub fn run_migrations(
 
 #[cfg(test)]
 mod test {
-    use cloudsync_common::FileMeta;
-
-    use crate::{db::TABLE_FILES, migrations::meta::TABLE_META};
-
     use super::*;
+    use crate::{db::db_file::TABLE_FILES, migrations::meta::TABLE_META};
+    use cloudsync_common::FileMeta;
 
     use chrono::Utc;
     use tempfile::TempDir;
