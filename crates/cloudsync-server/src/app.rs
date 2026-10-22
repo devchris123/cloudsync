@@ -24,13 +24,12 @@ use redb::Database;
 use crate::{
     auth::UserContext,
     config::ServerConfig,
-    db_upload::TenantUploadDb,
+    db::{db_file, db_upload},
     migrations,
     oidc::{Claims, OidcClient, OidcValidator},
     service,
 };
 
-use super::db;
 use super::storage;
 
 const MAX_CHUNK_SIZE: usize = 5 * 1024 * 1024;
@@ -310,7 +309,7 @@ async fn get_upload(
     extract::Path(upload_id): Path<String>,
     ctx: UserContext,
 ) -> Result<Json<GetUploadResponse>, AppError> {
-    let db = TenantUploadDb::new(state.db, ctx);
+    let db = db_upload::TenantUploadDb::new(state.db, ctx);
     let upload = db.get(&upload_id)?;
     let Some(upload) = upload else {
         return Err(AppError(
@@ -545,7 +544,7 @@ pub fn create_app(state: AppState) -> Router {
 }
 
 pub fn bootstrap_app(config: ServerConfig) -> anyhow::Result<Router> {
-    let db = db::open_db(&config.dbname)?;
+    let db = db_file::open_db(&config.dbname)?;
 
     // Run migrations
     migrations::run_migrations(&db, &config.default_tenant_id, &config.default_user_id)?;

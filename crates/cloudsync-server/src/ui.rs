@@ -12,7 +12,7 @@ use rust_embed::RustEmbed;
 use sha2::Sha256;
 
 use crate::auth::UserContext;
-use crate::{app::AppState, db::TenantDb};
+use crate::{app::AppState, db::db_file::TenantDb};
 
 type HmacSha256 = Hmac<Sha256>;
 

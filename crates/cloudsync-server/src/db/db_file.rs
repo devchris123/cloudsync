@@ -3,7 +3,7 @@ use std::sync::Arc;
 use cloudsync_common::FileMeta;
 use redb::{Database, ReadableTable, Table, TableDefinition};
 
-use crate::{auth::UserContext, db_upload::TABLE_UPLOADS};
+use crate::{auth::UserContext, db::db_upload::TABLE_UPLOADS};
 
 pub const TABLE_FILES: TableDefinition<&str, &[u8]> = TableDefinition::new("files");
 

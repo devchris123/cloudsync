@@ -1,7 +1,7 @@
 use cloudsync_common::FileMeta;
 use redb::{Database, ReadableTable};
 
-use crate::db::TABLE_FILES;
+use crate::db::db_file::TABLE_FILES;
 
 use super::meta;
 
