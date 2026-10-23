@@ -8,6 +8,7 @@ use crate::auth::UserContext;
 pub const TABLE_USAGES: TableDefinition<&str, &[u8]> = TableDefinition::new("usages");
 
 pub struct TenantUserDb {
+    #[cfg(test)]
     db: Arc<Database>,
     user_context: UserContext,
 }
@@ -19,17 +20,12 @@ pub struct UsageRecord {
 }
 
 impl TenantUserDb {
-    pub fn new(db: Arc<Database>, user_context: UserContext) -> Self {
-        TenantUserDb { db, user_context }
-    }
-
-    #[cfg(test)]
-    pub fn start_read_tx(&self) -> Result<redb::ReadTransaction, anyhow::Error> {
-        Ok(self.db.begin_read()?)
-    }
-
-    pub fn start_write_tx(&self) -> Result<redb::WriteTransaction, anyhow::Error> {
-        Ok(self.db.begin_write()?)
+    pub fn new(_db: Arc<Database>, user_context: UserContext) -> Self {
+        TenantUserDb {
+            #[cfg(test)]
+            db: _db,
+            user_context,
+        }
     }
 
     #[cfg(test)]
@@ -108,7 +104,7 @@ mod test {
     fn test_get_not_exist() {
         let (_dir, db) = test_db("tenant1");
 
-        let tx = db.start_write_tx().unwrap();
+        let tx = db.db.begin_write().unwrap();
         let usage_rec = db.get_write_tx(&tx).unwrap();
         tx.commit().unwrap();
 
@@ -119,11 +115,11 @@ mod test {
     fn test_get() {
         let (_dir, db) = test_db("tenant1");
 
-        let tx = db.start_write_tx().unwrap();
+        let tx = db.db.begin_write().unwrap();
         db.put_tx(&tx, 100).unwrap();
         tx.commit().unwrap();
 
-        let tx = db.start_write_tx().unwrap();
+        let tx = db.db.begin_write().unwrap();
         let usage_rec = db.get_write_tx(&tx).unwrap().unwrap();
 
         assert_eq!("tenant1", usage_rec.tenant_id);
@@ -134,14 +130,14 @@ mod test {
     fn test_tx_isolate_reads() {
         let (_dir, db) = test_db("tenant1");
 
-        let tx1 = db.start_write_tx().unwrap();
+        let tx1 = db.db.begin_write().unwrap();
         db.put_tx(&tx1, 0).unwrap();
         tx1.commit().unwrap();
 
-        let tx1 = db.start_write_tx().unwrap();
+        let tx1 = db.db.begin_write().unwrap();
         db.put_tx(&tx1, 100).unwrap();
 
-        let tx2 = db.start_read_tx().unwrap();
+        let tx2 = db.db.begin_read().unwrap();
         let user_record = db.get_read_tx(&tx2).unwrap().unwrap();
 
         assert_eq!("tenant1", user_record.tenant_id);
@@ -153,7 +149,7 @@ mod test {
         assert_eq!(0, db.get_read_tx(&tx2).unwrap().unwrap().usage);
 
         // A new read transaction sees the committed update.
-        let tx3 = db.start_read_tx().unwrap();
+        let tx3 = db.db.begin_read().unwrap();
         assert_eq!(100, db.get_read_tx(&tx3).unwrap().unwrap().usage);
     }
 }
