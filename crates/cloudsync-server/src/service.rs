@@ -123,7 +123,7 @@ impl TenantFileService {
     /// Returns `ServiceError::QuotaExceeded` if the operation would exceed the tenant's storage quota.
     pub fn create_file(&self, path: String, content: &[u8]) -> Result<FileMeta, ServiceError> {
         let usage_db = db_user::TenantUserDb::new(self.db.clone(), self.ctx.clone());
-        let tx = usage_db.start_write_tx()?;
+        let tx = self.db.begin_write().map_err(anyhow::Error::from)?;
         let usage = self.get_usage(&tx)?;
 
         let db_file = db_file::TenantDb::new(self.db.clone(), self.ctx.clone());
@@ -156,8 +156,7 @@ impl TenantFileService {
     /// Returns `ServiceError::QuotaExceeded` if the operation would exceed the tenant's storage quota.
     /// Returns `ServiceError::Validation` if the request is invalid.
     pub fn create_upload(&self, request: InitUploadRequest) -> Result<String, ServiceError> {
-        let usage_db = db_user::TenantUserDb::new(self.db.clone(), self.ctx.clone());
-        let tx = usage_db.start_write_tx()?;
+        let tx = self.db.begin_write().map_err(anyhow::Error::from)?;
         let usage = self.get_usage(&tx)?;
 
         self.check_quota(&tx, &request.total_hash, request.total_size, usage)?;
@@ -272,7 +271,7 @@ impl TenantFileService {
             db_upload::TenantUploadDb::new(self.db.clone(), self.ctx.clone());
         let usage_db = db_user::TenantUserDb::new(self.db.clone(), self.ctx.clone());
 
-        let tx = usage_db.start_write_tx()?;
+        let tx = self.db.begin_write().map_err(anyhow::Error::from)?;
 
         let upload = upload_db.get_write_tx(&tx, upload_id)?;
 
@@ -362,7 +361,7 @@ mod test {
 
     fn finalize_state(db: &Arc<Database>, ctx: &UserContext, upload_id: &str) -> serde_json::Value {
         let usage_db = db_user::TenantUserDb::new(db.clone(), ctx.clone());
-        let tx = usage_db.start_read_tx().unwrap();
+        let tx = db.begin_read().unwrap();
         serde_json::json!({
             "usage": usage_db.get_read_tx(&tx).unwrap(),
             "files": db_file::TenantDb::new(db.clone(), ctx.clone()).list().unwrap(),
@@ -476,7 +475,7 @@ mod test {
         let ctx = service.ctx.clone();
 
         let usage_db = db_user::TenantUserDb::new(db.clone(), ctx.clone());
-        let tx = usage_db.start_read_tx().unwrap();
+        let tx = db.begin_read().unwrap();
         let usage = usage_db.get_read_tx(&tx).unwrap();
         assert!(usage.is_none());
 
@@ -485,7 +484,7 @@ mod test {
 
         // New path, new content -> succeed and increase usage
         assert!(file_meta.is_ok());
-        let tx = usage_db.start_read_tx().unwrap();
+        let tx = db.begin_read().unwrap();
         let usage = usage_db.get_read_tx(&tx).unwrap().unwrap();
         assert_eq!(usage.usage, 11);
 
@@ -493,14 +492,14 @@ mod test {
 
         let file_meta = service.create_file("testpath2".to_string(), b"tsetcontent");
         assert!(file_meta.is_ok());
-        let tx = usage_db.start_read_tx().unwrap();
+        let tx = db.begin_read().unwrap();
         let usage = usage_db.get_read_tx(&tx).unwrap().unwrap();
         assert_eq!(usage.usage, 22);
 
         // new path, old content -> succeed and keep usage the same
         let file_meta = service.create_file("testpath3".to_string(), b"tsetcontent");
         assert!(file_meta.is_ok());
-        let tx = usage_db.start_read_tx().unwrap();
+        let tx = db.begin_read().unwrap();
         let usage = usage_db.get_read_tx(&tx).unwrap().unwrap();
         assert_eq!(usage.usage, 22);
 
@@ -511,7 +510,7 @@ mod test {
             file_meta.err().unwrap(),
             ServiceError::QuotaExceeded
         ));
-        let tx = usage_db.start_read_tx().unwrap();
+        let tx = db.begin_read().unwrap();
         let usage = usage_db.get_read_tx(&tx).unwrap().unwrap();
         assert_eq!(22, usage.usage);
         assert!(storage::exist_storage_path(
@@ -529,7 +528,7 @@ mod test {
 
         let file_meta = service.create_file("testpath3".to_string(), b"newcontent");
         assert!(file_meta.is_ok());
-        let tx = usage_db.start_read_tx().unwrap();
+        let tx = db.begin_read().unwrap();
         let usage = usage_db.get_read_tx(&tx).unwrap().unwrap();
         assert_eq!(usage.usage, 32);
     }
@@ -628,7 +627,7 @@ mod test {
 
         let upload = service.create_upload(upload_req);
         assert!(upload.is_ok());
-        let tx = usage_db.start_read_tx().unwrap();
+        let tx = db.begin_read().unwrap();
         assert_eq!(usage_db.get_read_tx(&tx).unwrap().unwrap().usage, 0);
 
         // Additional upload accumulates usage
@@ -642,7 +641,7 @@ mod test {
 
         let upload = service.create_upload(upload_req.clone());
         assert!(upload.is_ok());
-        let tx = usage_db.start_read_tx().unwrap();
+        let tx = db.begin_read().unwrap();
         assert_eq!(usage_db.get_read_tx(&tx).unwrap().unwrap().usage, 0);
 
         // Duplicate uploads accumulates usage
@@ -650,7 +649,7 @@ mod test {
 
         let upload = service.create_upload(upload_req);
         assert!(upload.is_ok());
-        let tx = usage_db.start_read_tx().unwrap();
+        let tx = db.begin_read().unwrap();
         assert_eq!(usage_db.get_read_tx(&tx).unwrap().unwrap().usage, 0);
     }
 
@@ -755,9 +754,7 @@ mod test {
         let res = service.finalize_upload(upload_id.as_str());
         assert!(res.is_ok(), "finalize_upload failed: {:?}", res.err());
 
-        let tx = db_user::TenantUserDb::new(db.clone(), ctx.clone())
-            .start_read_tx()
-            .unwrap();
+        let tx = db.begin_read().unwrap();
         let usage = db_user::TenantUserDb::new(db.clone(), ctx.clone())
             .get_read_tx(&tx)
             .unwrap()
@@ -922,9 +919,7 @@ mod test {
         let res = service.finalize_upload(upload_id.as_str());
         assert!(res.is_ok(), "finalize_upload failed: {:?}", res.err());
 
-        let tx = db_user::TenantUserDb::new(db.clone(), ctx.clone())
-            .start_read_tx()
-            .unwrap();
+        let tx = db.begin_read().unwrap();
         let usage = db_user::TenantUserDb::new(db.clone(), ctx.clone())
             .get_read_tx(&tx)
             .unwrap()
