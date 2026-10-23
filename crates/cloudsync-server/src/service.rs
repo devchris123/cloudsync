@@ -1,3 +1,4 @@
+use crate::db::tx::Transaction;
 use crate::db::{db_file, db_upload, db_user};
 use crate::{auth::UserContext, storage};
 use cloudsync_common::{FileMeta, InitUploadRequest, hash_bytes};
@@ -171,7 +172,7 @@ impl TenantFileService {
 
     fn get_usage(&self, tx: &redb::WriteTransaction) -> anyhow::Result<u64> {
         let usage_db = db_user::TenantUserDb::new(self.db.clone(), self.ctx.clone());
-        let usage = usage_db.get_write_tx(tx)?;
+        let usage = usage_db.get_tx(&Transaction::Write(tx))?;
         let usage = match usage {
             Some(usage) => usage.usage,
             None => {
@@ -273,7 +274,7 @@ impl TenantFileService {
 
         let tx = self.db.begin_write().map_err(anyhow::Error::from)?;
 
-        let upload = upload_db.get_write_tx(&tx, upload_id)?;
+        let upload = upload_db.get_tx(&tx, upload_id)?;
 
         let Some(upload) = upload else {
             tx.commit()?;
@@ -304,7 +305,7 @@ impl TenantFileService {
                 &upload.total_hash,
                 upload.total_size,
             )?;
-            let usage = usage_db.get_write_tx(&tx)?.unwrap();
+            let usage = usage_db.get_tx(&Transaction::Write(&tx))?.unwrap();
             usage_db.put_tx(&tx, usage.usage + seen_bytes)?;
         } else {
             let meta = std::fs::metadata(storage_path)?;
@@ -363,7 +364,7 @@ mod test {
         let usage_db = db_user::TenantUserDb::new(db.clone(), ctx.clone());
         let tx = db.begin_read().unwrap();
         serde_json::json!({
-            "usage": usage_db.get_read_tx(&tx).unwrap(),
+            "usage": usage_db.get_tx(&Transaction::Read(&tx)).unwrap(),
             "files": db_file::TenantDb::new(db.clone(), ctx.clone()).list().unwrap(),
             "upload": db_upload::TenantUploadDb::new(db.clone(), ctx.clone()).get(upload_id).unwrap(),
         })
@@ -476,7 +477,7 @@ mod test {
 
         let usage_db = db_user::TenantUserDb::new(db.clone(), ctx.clone());
         let tx = db.begin_read().unwrap();
-        let usage = usage_db.get_read_tx(&tx).unwrap();
+        let usage = usage_db.get_tx(&Transaction::Read(&tx)).unwrap();
         assert!(usage.is_none());
 
         // New path, new content -> succeed and increase usage
@@ -485,7 +486,7 @@ mod test {
         // New path, new content -> succeed and increase usage
         assert!(file_meta.is_ok());
         let tx = db.begin_read().unwrap();
-        let usage = usage_db.get_read_tx(&tx).unwrap().unwrap();
+        let usage = usage_db.get_tx(&Transaction::Read(&tx)).unwrap().unwrap();
         assert_eq!(usage.usage, 11);
 
         service.default_user_quota_bytes = 22;
@@ -493,14 +494,14 @@ mod test {
         let file_meta = service.create_file("testpath2".to_string(), b"tsetcontent");
         assert!(file_meta.is_ok());
         let tx = db.begin_read().unwrap();
-        let usage = usage_db.get_read_tx(&tx).unwrap().unwrap();
+        let usage = usage_db.get_tx(&Transaction::Read(&tx)).unwrap().unwrap();
         assert_eq!(usage.usage, 22);
 
         // new path, old content -> succeed and keep usage the same
         let file_meta = service.create_file("testpath3".to_string(), b"tsetcontent");
         assert!(file_meta.is_ok());
         let tx = db.begin_read().unwrap();
-        let usage = usage_db.get_read_tx(&tx).unwrap().unwrap();
+        let usage = usage_db.get_tx(&Transaction::Read(&tx)).unwrap().unwrap();
         assert_eq!(usage.usage, 22);
 
         // existing path, new content, limited quota -> fails with QuotaExceeded
@@ -511,7 +512,7 @@ mod test {
             ServiceError::QuotaExceeded
         ));
         let tx = db.begin_read().unwrap();
-        let usage = usage_db.get_read_tx(&tx).unwrap().unwrap();
+        let usage = usage_db.get_tx(&Transaction::Read(&tx)).unwrap().unwrap();
         assert_eq!(22, usage.usage);
         assert!(storage::exist_storage_path(
             service.storage_dir.as_path(),
@@ -529,7 +530,7 @@ mod test {
         let file_meta = service.create_file("testpath3".to_string(), b"newcontent");
         assert!(file_meta.is_ok());
         let tx = db.begin_read().unwrap();
-        let usage = usage_db.get_read_tx(&tx).unwrap().unwrap();
+        let usage = usage_db.get_tx(&Transaction::Read(&tx)).unwrap().unwrap();
         assert_eq!(usage.usage, 32);
     }
 
@@ -628,7 +629,14 @@ mod test {
         let upload = service.create_upload(upload_req);
         assert!(upload.is_ok());
         let tx = db.begin_read().unwrap();
-        assert_eq!(usage_db.get_read_tx(&tx).unwrap().unwrap().usage, 0);
+        assert_eq!(
+            usage_db
+                .get_tx(&Transaction::Read(&tx))
+                .unwrap()
+                .unwrap()
+                .usage,
+            0
+        );
 
         // Additional upload accumulates usage
         let upload_req = InitUploadRequest {
@@ -642,7 +650,14 @@ mod test {
         let upload = service.create_upload(upload_req.clone());
         assert!(upload.is_ok());
         let tx = db.begin_read().unwrap();
-        assert_eq!(usage_db.get_read_tx(&tx).unwrap().unwrap().usage, 0);
+        assert_eq!(
+            usage_db
+                .get_tx(&Transaction::Read(&tx))
+                .unwrap()
+                .unwrap()
+                .usage,
+            0
+        );
 
         // Duplicate uploads accumulates usage
         service.default_user_quota_bytes = 301;
@@ -650,7 +665,14 @@ mod test {
         let upload = service.create_upload(upload_req);
         assert!(upload.is_ok());
         let tx = db.begin_read().unwrap();
-        assert_eq!(usage_db.get_read_tx(&tx).unwrap().unwrap().usage, 0);
+        assert_eq!(
+            usage_db
+                .get_tx(&Transaction::Read(&tx))
+                .unwrap()
+                .unwrap()
+                .usage,
+            0
+        );
     }
 
     #[test]
@@ -756,7 +778,7 @@ mod test {
 
         let tx = db.begin_read().unwrap();
         let usage = db_user::TenantUserDb::new(db.clone(), ctx.clone())
-            .get_read_tx(&tx)
+            .get_tx(&Transaction::Read(&tx))
             .unwrap()
             .unwrap();
         assert_eq!(usage.usage, 6);
@@ -921,7 +943,7 @@ mod test {
 
         let tx = db.begin_read().unwrap();
         let usage = db_user::TenantUserDb::new(db.clone(), ctx.clone())
-            .get_read_tx(&tx)
+            .get_tx(&Transaction::Read(&tx))
             .unwrap()
             .unwrap();
         assert_eq!(usage.usage, 6);

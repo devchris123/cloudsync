@@ -23,7 +23,7 @@ impl TenantUploadDb {
         self.get_from_table(&table, upload_id)
     }
 
-    pub fn get_write_tx(
+    pub fn get_tx(
         &self,
         tx: &redb::WriteTransaction,
         upload_id: &str,
