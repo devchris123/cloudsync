@@ -4,6 +4,7 @@ use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::UserContext;
+use crate::db::tx::Transaction;
 
 pub const TABLE_USAGES: TableDefinition<&str, &[u8]> = TableDefinition::new("usages");
 
@@ -28,21 +29,18 @@ impl TenantUserDb {
         }
     }
 
-    #[cfg(test)]
-    pub fn get_read_tx(
-        &self,
-        tx: &redb::ReadTransaction,
-    ) -> Result<Option<UsageRecord>, anyhow::Error> {
-        let table = tx.open_table(TABLE_USAGES)?;
-        self.get_from_table(&table)
-    }
-
-    pub fn get_write_tx(
-        &self,
-        tx: &redb::WriteTransaction,
-    ) -> Result<Option<UsageRecord>, anyhow::Error> {
-        let table = tx.open_table(TABLE_USAGES)?;
-        self.get_from_table(&table)
+    pub fn get_tx(&self, tx: &Transaction) -> Result<Option<UsageRecord>, anyhow::Error> {
+        match tx {
+            #[cfg(test)]
+            Transaction::Read(tx) => {
+                let table = tx.open_table(TABLE_USAGES)?;
+                self.get_from_table(&table)
+            }
+            Transaction::Write(tx) => {
+                let table = tx.open_table(TABLE_USAGES)?;
+                self.get_from_table(&table)
+            }
+        }
     }
 
     fn get_from_table(
@@ -105,7 +103,7 @@ mod test {
         let (_dir, db) = test_db("tenant1");
 
         let tx = db.db.begin_write().unwrap();
-        let usage_rec = db.get_write_tx(&tx).unwrap();
+        let usage_rec = db.get_tx(&Transaction::Write(&tx)).unwrap();
         tx.commit().unwrap();
 
         assert!(usage_rec.is_none());
@@ -120,7 +118,7 @@ mod test {
         tx.commit().unwrap();
 
         let tx = db.db.begin_write().unwrap();
-        let usage_rec = db.get_write_tx(&tx).unwrap().unwrap();
+        let usage_rec = db.get_tx(&Transaction::Write(&tx)).unwrap().unwrap();
 
         assert_eq!("tenant1", usage_rec.tenant_id);
         assert_eq!(100, usage_rec.usage);
@@ -138,7 +136,7 @@ mod test {
         db.put_tx(&tx1, 100).unwrap();
 
         let tx2 = db.db.begin_read().unwrap();
-        let user_record = db.get_read_tx(&tx2).unwrap().unwrap();
+        let user_record = db.get_tx(&Transaction::Read(&tx2)).unwrap().unwrap();
 
         assert_eq!("tenant1", user_record.tenant_id);
         assert_eq!(0, user_record.usage);
@@ -146,10 +144,16 @@ mod test {
         tx1.commit().unwrap();
 
         // The existing read transaction retains its original snapshot.
-        assert_eq!(0, db.get_read_tx(&tx2).unwrap().unwrap().usage);
+        assert_eq!(
+            0,
+            db.get_tx(&Transaction::Read(&tx2)).unwrap().unwrap().usage
+        );
 
         // A new read transaction sees the committed update.
         let tx3 = db.db.begin_read().unwrap();
-        assert_eq!(100, db.get_read_tx(&tx3).unwrap().unwrap().usage);
+        assert_eq!(
+            100,
+            db.get_tx(&Transaction::Read(&tx3)).unwrap().unwrap().usage
+        );
     }
 }
