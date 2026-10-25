@@ -100,6 +100,7 @@ fn create_config(args: cli::Args) -> config::ServerConfig {
         default_tenant_id: args.default_tenant_id,
         default_user_id: args.default_user_id,
         default_user_quota_bytes: args.default_user_quota_bytes,
+        max_tenant_count: args.max_tenant_count,
         oidc_config: match (
             args.oidc_issuer,
             args.oidc_discovery_url,
@@ -140,6 +141,7 @@ mod tests {
             oidc_audience: Some("cloudsync".to_string()),
             oidc_client_id: None,
             max_upload_file_size: 100,
+            max_tenant_count: 10,
         };
 
         let config = create_config(args);
@@ -177,6 +179,7 @@ mod tests {
             oidc_audience: Some("cloudsync".to_string()),
             oidc_client_id: None,
             max_upload_file_size: 100,
+            max_tenant_count: 10,
         };
 
         let config = create_config(args);
@@ -214,6 +217,7 @@ mod tests {
             oidc_audience: Some("cloudsync-api".to_string()),
             oidc_client_id: Some("cloudsync-web".to_string()),
             max_upload_file_size: 100,
+            max_tenant_count: 10,
         };
 
         let config = create_config(args);

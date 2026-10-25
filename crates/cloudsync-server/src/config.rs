@@ -7,6 +7,7 @@ pub const DEFAULT_TENANT_ID: &str = "default-tenant";
 pub const DEFAULT_USER_ID: &str = "default-user";
 pub const DEFAULT_OIDC_AUDIENCE: &str = "cloudsync";
 pub const DEFAULT_USER_QUOTA_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub const DEFAULT_MAX_TENANT_COUNT: u64 = 10;
 
 pub struct OidcConfig {
     pub issuer: String,
@@ -29,6 +30,7 @@ pub struct ServerConfig {
     pub oidc_config: Option<OidcConfig>,
     pub max_upload_file_size: u64,
     pub default_user_quota_bytes: u64,
+    pub max_tenant_count: u64,
 }
 
 impl ServerConfig {
@@ -54,6 +56,7 @@ impl ServerConfig {
             oidc_config: None,
             max_upload_file_size: 10 * 1024 * 1024 * 1024, // 10 GiB
             default_user_quota_bytes: DEFAULT_USER_QUOTA_BYTES,
+            max_tenant_count: DEFAULT_MAX_TENANT_COUNT,
         }
     }
 }

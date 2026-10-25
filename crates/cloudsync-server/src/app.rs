@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::sync::Arc;
 
 use axum::{
@@ -23,14 +24,15 @@ use redb::Database;
 
 use crate::{
     auth::UserContext,
-config::ServerConfig,
-db::{
-db_file::{self},
-db_upload,
+    config::ServerConfig,
+    db::{
+        db_file::{self},
+        db_tenants::{TenantDb, TenantRecord},
+        db_upload,
     },
-migrations,
-oidc::{Claims, OidcClient, OidcValidator},
-service,
+    migrations,
+    oidc::{Claims, OidcClient, OidcValidator},
+    service,
 };
 
 use super::storage;
@@ -55,6 +57,7 @@ pub struct AppState {
     /// talk to the IdP); see `oidc::OidcClient` for the rationale.
     pub oidc_client: Option<OidcClient>,
     pub max_upload_file_size: u64,
+    pub max_tenant_count: u64,
 }
 
 struct AppError(anyhow::Error, StatusCode);
@@ -479,6 +482,70 @@ async fn require_auth_layer(request: Request, next: Next) -> Result<Response, St
     }
 }
 
+async fn tenant_registry_layer(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let ctx = request.extensions().get::<UserContext>();
+    if let Some(ctx) = ctx {
+        let admitted = admit_tenant(state.db, ctx.tenant_id.as_str(), state.max_tenant_count).map_err(|err| {
+            tracing::error!(tenant_id=%ctx.tenant_id, error=?err, "failed to check tenant admission");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        if !admitted {
+            tracing::warn!(
+                tenant_id=%ctx.tenant_id,
+                "tenant creation rejected: max tenant count {} reached",
+                state.max_tenant_count
+            );
+            return Err(StatusCode::FORBIDDEN);
+        }
+        Ok(next.run(request).await)
+    } else {
+        tracing::trace!("no user context available. Skip to next middleware layer.",);
+        // Authentication requirements and login redirects are handled separately.
+        Ok(next.run(request).await)
+    }
+}
+
+fn admit_tenant(db: Arc<Database>, tenant_id: &str, max_tenant_count: u64) -> anyhow::Result<bool> {
+    let tenant_db = TenantDb::new();
+    let tx = db
+        .begin_write()
+        .context("opening tenant admission transaction")?;
+    let exists = tenant_db
+        .exists(&tx, tenant_id)
+        .context("checking tenant existence")?;
+    if exists {
+        tx.abort().context("abort tenant admission transaction")?;
+        return Ok(true);
+    }
+    let count = tenant_db
+        .count(&tx)
+        .context("call database for tenant count")?;
+    if count >= max_tenant_count {
+        tx.abort().context("abort tenant admission transaction")?;
+        return Ok(false);
+    }
+    tenant_db
+        .create(
+            &tx,
+            TenantRecord {
+                tenant_id: tenant_id.to_string(),
+            },
+        )
+        .context("create tenant record")?;
+    tx.commit()
+        .context("committing tenant admission transaction")?;
+    tracing::info!(
+        tenant_id = %tenant_id,
+        "new tenant registered (tenant count: {})",
+        count + 1
+    );
+    Ok(true)
+}
+
 pub fn create_app(state: AppState) -> Router {
     // API routes with Bearer token / cookie auth
     let auth_router = Router::<AppState>::new()
@@ -496,6 +563,10 @@ pub fn create_app(state: AppState) -> Router {
             "/api/v1/uploads/{upload_id}/finalize",
             post(finalize_upload),
         )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            tenant_registry_layer,
+        ))
         .route_layer(axum::middleware::from_fn(require_auth_layer))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -510,6 +581,10 @@ pub fn create_app(state: AppState) -> Router {
     // Cookie-auth-only HTML fragment routes for HTMX swaps.
     let partials_router = Router::<AppState>::new()
         .route("/partials/files", get(crate::ui::partial_files))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            tenant_registry_layer,
+        ))
         .route_layer(axum::middleware::from_fn(require_auth_layer))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -532,6 +607,10 @@ pub fn create_app(state: AppState) -> Router {
     // list; on missing/invalid cookie it redirects to /login itself.
     let browse_router = Router::<AppState>::new()
         .route("/browse", get(crate::ui::browse))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            tenant_registry_layer,
+        ))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             cookie_auth_layer,
@@ -581,6 +660,7 @@ pub fn bootstrap_app(config: ServerConfig) -> anyhow::Result<Router> {
         oidc,
         oidc_client,
         max_upload_file_size: config.max_upload_file_size,
+        max_tenant_count: config.max_tenant_count,
     };
     let app = create_app(state);
     Ok(app)
