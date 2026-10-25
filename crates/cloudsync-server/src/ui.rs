@@ -160,7 +160,7 @@ pub struct LoginForm {
 }
 
 pub async fn index(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
-    if has_session(&headers, &state.token) {
+    if has_session(&headers, &state.session_signing_secret) {
         Redirect::to("/browse").into_response()
     } else {
         Redirect::to("/login").into_response()
@@ -172,7 +172,7 @@ pub async fn login_page(
     headers: axum::http::HeaderMap,
     Query(query): Query<LoginPageQuery>,
 ) -> Response {
-    if has_session(&headers, &state.token) {
+    if has_session(&headers, &state.session_signing_secret) {
         return Redirect::to("/browse").into_response();
     }
     // Map the structured err code into a user-facing message. Never render
@@ -200,7 +200,7 @@ pub async fn login_submit(
         };
         return (StatusCode::FORBIDDEN, Html(template.render().unwrap())).into_response();
     }
-    let cookie = make_session_cookie(&state.token);
+    let cookie = make_session_cookie(&state.session_signing_secret);
     let mut response = Redirect::to("/browse").into_response();
     response
         .headers_mut()
@@ -214,7 +214,8 @@ pub async fn logout(State(state): State<AppState>, headers: axum::http::HeaderMa
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let has_oidc_session =
-        crate::oidc_web::read_session_cookie(&state.token, cookie_header).is_some();
+        crate::oidc_web::read_session_cookie(&state.session_signing_secret, cookie_header)
+            .is_some();
 
     // For OIDC sessions: clear the cookie and ALSO redirect to Keycloak's
     // end_session_endpoint so the IdP-side SSO is killed too. Without this,

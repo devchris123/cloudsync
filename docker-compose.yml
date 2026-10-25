@@ -5,6 +5,7 @@ services:
       - ${CLOUDSYNC_MOUNT_DIR}:/data
     environment:
       - CLOUDSYNC_TOKEN=$CLOUDSYNC_TOKEN
+      - CLOUDSYNC_SESSION_SIGNING_SECRET=${CLOUDSYNC_SESSION_SIGNING_SECRET:?Set a separate session signing secret}
       - CLOUDSYNC_STORAGE_DIR=/data/files
       - CLOUDSYNC_STAGING_DIR=/data/staging
       - CLOUDSYNC_DBNAME=/data/data.redb

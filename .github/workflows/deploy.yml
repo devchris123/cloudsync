@@ -17,6 +17,7 @@ jobs:
         env:
           DEPLOY_SSH_KEY: ${{ secrets.CLOUDSYNC_HETZNER_PRIVATE_KEY }}
           CLOUDSYNC_TOKEN: ${{ secrets.CLOUDSYNC_TOKEN }}
+          CLOUDSYNC_SESSION_SIGNING_SECRET: ${{ secrets.CLOUDSYNC_SESSION_SIGNING_SECRET }}
           CLOUDSYNC_GRAFANA_ADMIN_PASSWORD: ${{ secrets.CLOUDSYNC_GRAFANA_ADMIN_PASSWORD }}
           CLOUDSYNC_KC_ADMIN: ${{ secrets.CLOUDSYNC_KC_ADMIN }}
           CLOUDSYNC_KC_ADMIN_PASSWORD: ${{ secrets.CLOUDSYNC_KC_ADMIN_PASSWORD }}
@@ -41,6 +42,7 @@ jobs:
             CLOUDSYNC_DOCKER_TAG=${{ inputs.version }} \
             CLOUDSYNC_MOUNT_DIR=/mnt/volume-cloudsync/cloudsync \
             CLOUDSYNC_TOKEN=$CLOUDSYNC_TOKEN \
+            CLOUDSYNC_SESSION_SIGNING_SECRET=$CLOUDSYNC_SESSION_SIGNING_SECRET \
             CLOUDSYNC_CADDY_MOUNT_DIR=/mnt/volume-cloudsync/caddy \
             CLOUDSYNC_CADDYFILE_DIR=./caddy \
             CLOUDSYNC_OBSERVABILITY_DIR=./observability \

@@ -8,6 +8,7 @@ use cloudsync_server::config;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = cli::Args::parse();
+    args.validate().unwrap_or_else(|err| err.exit());
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
@@ -94,6 +95,7 @@ fn create_config(args: cli::Args) -> config::ServerConfig {
         storage_dir: args.storage_dir,
         staging_dir: args.staging_dir,
         token: args.token,
+        session_signing_secret: args.session_signing_secret,
         dbname: args.dbname,
         default_tenant_id: args.default_tenant_id,
         default_user_id: args.default_user_id,
@@ -126,6 +128,7 @@ mod tests {
             host: "localhost".to_string(),
             port: 0,
             token: "test_token".to_string(),
+            session_signing_secret: "test-session-signing-secret".to_string(),
             storage_dir: "test_storage".to_string(),
             staging_dir: "test_staging".to_string(),
             dbname: "test_db".to_string(),
@@ -141,6 +144,7 @@ mod tests {
 
         let config = create_config(args);
 
+        assert_eq!(config.session_signing_secret, "test-session-signing-secret");
         assert!(config.oidc_config.is_some());
         let oidc_config = config.oidc_config.unwrap();
         assert_eq!(oidc_config.issuer, "https://example.com/issuer");
@@ -161,6 +165,7 @@ mod tests {
             host: "localhost".to_string(),
             port: 0,
             token: "test_token".to_string(),
+            session_signing_secret: "test-session-signing-secret".to_string(),
             storage_dir: "test_storage".to_string(),
             staging_dir: "test_staging".to_string(),
             dbname: "test_db".to_string(),
@@ -197,6 +202,7 @@ mod tests {
             host: "localhost".to_string(),
             port: 0,
             token: "test_token".to_string(),
+            session_signing_secret: "test-session-signing-secret".to_string(),
             storage_dir: "test_storage".to_string(),
             staging_dir: "test_staging".to_string(),
             dbname: "test_db".to_string(),
