@@ -111,6 +111,14 @@ pub struct Args {
         default_value_t = 10 * 1024 * 1024 * 1024 // 10GiB
     )]
     pub max_upload_file_size: u64,
+
+    #[arg(
+        long,
+        env = "CLOUDSYNC_MAX_TENANT_COUNT",
+        help = "Maximum number of tenants allowed to be created on the server",
+        default_value_t = config::DEFAULT_MAX_TENANT_COUNT
+    )]
+    pub max_tenant_count: u64,
 }
 
 impl Args {
