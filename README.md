@@ -21,8 +21,11 @@ Create a `.env` file:
 
 ```
 CLOUDSYNC_TOKEN=your-secret-token
+CLOUDSYNC_SESSION_SIGNING_SECRET=your-independent-random-secret
 CLOUDSYNC_MOUNT_DIR=/path/to/data
 ```
+
+Generate the session signing secret with `openssl rand -hex 32`. Keep it private and stable across restarts (and identical across server replicas). Rotating it invalidates all session and OIDC login-state cookies. The CLI also accepts `--session-signing-secret`.
 
 Then run:
 
@@ -91,6 +94,7 @@ docs/
 | `CLOUDSYNC_HOST` | `127.0.0.1` | Bind address |
 | `CLOUDSYNC_PORT` | `3050` | Bind port |
 | `CLOUDSYNC_TOKEN` | *(required)* | Auth token |
+| `CLOUDSYNC_SESSION_SIGNING_SECRET` | *(required)* | Server-only cookie signing secret; must differ from the auth token |
 | `CLOUDSYNC_STORAGE_DIR` | `cloudsync/data/files` | Content-addressable file storage |
 | `CLOUDSYNC_STAGING_DIR` | `cloudsync/data/staging` | Temporary chunked upload staging |
 | `CLOUDSYNC_DBNAME` | `data.redb` | Metadata database path |

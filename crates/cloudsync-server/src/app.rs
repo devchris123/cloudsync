@@ -44,6 +44,7 @@ pub struct AppState {
     pub storage_dir: std::path::PathBuf,
     pub staging_dir: std::path::PathBuf,
     pub token: String,
+    pub session_signing_secret: String,
     pub default_tenant_id: String,
     pub default_user_id: String,
     pub default_user_quota_bytes: u64,
@@ -445,14 +446,16 @@ async fn cookie_auth_layer(
 
     // Prefer the OIDC user-session cookie when present — it carries a real
     // identity. Fall back to the legacy static-token cookie (shared identity).
-    if let Some(session) = crate::oidc_web::read_session_cookie(&state.token, cookie_str) {
+    if let Some(session) =
+        crate::oidc_web::read_session_cookie(&state.session_signing_secret, cookie_str)
+    {
         tracing::debug!(auth = "cookie-oidc", sub = %session.sub, "auth resolved");
         // Match the bearer layer (app.rs:282-285): tenant = user = sub.
         request.extensions_mut().insert(UserContext {
             tenant_id: session.sub.clone(),
             user_id: session.sub,
         });
-    } else if crate::ui::verify_session_cookie(cookie_str, &state.token) {
+    } else if crate::ui::verify_session_cookie(cookie_str, &state.session_signing_secret) {
         tracing::debug!(
             auth = "cookie-static",
             user_id = %state.default_user_id,
@@ -571,6 +574,7 @@ pub fn bootstrap_app(config: ServerConfig) -> anyhow::Result<Router> {
         storage_dir: std::path::PathBuf::from(&config.storage_dir),
         staging_dir: std::path::PathBuf::from(&config.staging_dir),
         token: config.token,
+        session_signing_secret: config.session_signing_secret,
         default_tenant_id: config.default_tenant_id,
         default_user_id: config.default_user_id,
         default_user_quota_bytes: config.default_user_quota_bytes,

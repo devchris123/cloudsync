@@ -36,6 +36,8 @@ services:
     environment:
       # Static-token fallback — still works alongside OIDC.
       - CLOUDSYNC_TOKEN=local-dev-token
+      # Development only; production must use a private random secret.
+      - CLOUDSYNC_SESSION_SIGNING_SECRET=local-dev-session-signing-secret
       - CLOUDSYNC_HOST=0.0.0.0
       - CLOUDSYNC_STORAGE_DIR=/data/files
       - CLOUDSYNC_STAGING_DIR=/data/staging

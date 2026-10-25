@@ -12,8 +12,8 @@
 //! - `cloudsync_user_session` (post-login, capped 8h): carries `sub|email|exp`.
 //!   HMAC-signed. The auth layer reads it to populate [`UserContext`].
 //!
-//! Both cookies are HMAC-SHA256'd with `AppState::token` as the key — same
-//! trust boundary as the legacy static-token cookie. No new secret to manage.
+//! Both cookies are HMAC-SHA256 signed with the server-only
+//! `AppState::session_signing_secret`, independent of the static login token.
 //!
 //! ## Public vs internal URL
 //!
@@ -119,11 +119,7 @@ impl SessionCookie {
 
 // ---------- Cookie sign / verify ----------
 
-/// Sign `body` with HMAC-SHA256 keyed on the server's static token.
-///
-/// Reusing `state.token` keeps the trust boundary identical to the legacy
-/// session cookie — anyone who knows the token can already authenticate, so
-/// they could already mint cookies. No additional secret to manage.
+/// Sign `body` with HMAC-SHA256 keyed on the server-only cookie signing secret.
 fn sign(token: &str, label: &[u8], body: &str) -> String {
     let mut mac =
         HmacSha256::new_from_slice(token.as_bytes()).expect("HMAC accepts keys of any length");
@@ -342,7 +338,8 @@ pub async fn login(
         return_to,
         issued_at: now_secs(),
     };
-    let state_cookie_header = make_state_cookie(&state.token, &state_cookie_payload, secure);
+    let state_cookie_header =
+        make_state_cookie(&state.session_signing_secret, &state_cookie_payload, secure);
 
     // Build the authorize URL by hand rather than via oauth2's builder because
     // we want the public `issuer` URL here, while the BasicClient we build
@@ -380,7 +377,8 @@ pub async fn callback(
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let Some(state_payload) = read_state_cookie(&state.token, cookie_header) else {
+    let Some(state_payload) = read_state_cookie(&state.session_signing_secret, cookie_header)
+    else {
         tracing::warn!("auth callback: missing or invalid state cookie");
         return Redirect::to("/login?err=session_expired").into_response();
     };
@@ -473,7 +471,7 @@ pub async fn callback(
         email: claims.email,
         exp: session_exp,
     };
-    let session_header = make_session_cookie(&state.token, &session, secure);
+    let session_header = make_session_cookie(&state.session_signing_secret, &session, secure);
     let clear_state = clear_state_cookie(secure);
 
     let mut resp = Redirect::to(&state_payload.return_to).into_response();

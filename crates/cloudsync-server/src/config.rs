@@ -21,6 +21,8 @@ pub struct ServerConfig {
     pub storage_dir: String,
     pub staging_dir: String,
     pub token: String,
+    /// Server-only key for session and OIDC state cookies.
+    pub session_signing_secret: String,
     pub dbname: String,
     pub default_tenant_id: String,
     pub default_user_id: String,
@@ -31,7 +33,8 @@ pub struct ServerConfig {
 
 impl ServerConfig {
     /// Create a config with default settings and an explicit authentication token.
-    /// Does not read CLI arguments or environment variables.
+    /// Generates an independent random cookie signing secret. Set it explicitly
+    /// to preserve sessions across restarts. Does not read CLI arguments or environment variables.
     pub fn new(token: String) -> Self {
         Self {
             host: DEFAULT_HOST.into(),
@@ -39,6 +42,12 @@ impl ServerConfig {
             storage_dir: DEFAULT_STORAGE_DIR.into(),
             staging_dir: DEFAULT_STAGING_DIR.into(),
             token,
+            session_signing_secret: {
+                use rand::RngCore;
+                let mut key = [0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut key);
+                hex::encode(key)
+            },
             dbname: DEFAULT_DBNAME.into(),
             default_tenant_id: DEFAULT_TENANT_ID.into(),
             default_user_id: DEFAULT_USER_ID.into(),

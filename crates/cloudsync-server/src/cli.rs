@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{CommandFactory, Parser, error::ErrorKind};
 use cloudsync_server::config;
 
 #[derive(Parser)]
@@ -20,9 +20,17 @@ pub struct Args {
     #[arg(
         long,
         env = "CLOUDSYNC_TOKEN",
+        hide_env_values = true,
         help = "Static bearer token used to authenticate requests"
     )]
     pub token: String,
+    #[arg(
+        long,
+        env = "CLOUDSYNC_SESSION_SIGNING_SECRET",
+        hide_env_values = true,
+        help = "Server-only cookie signing secret; use a random value distinct from the static token"
+    )]
+    pub session_signing_secret: String,
     #[arg(
         long,
         env = "CLOUDSYNC_STORAGE_DIR",
@@ -103,4 +111,66 @@ pub struct Args {
         default_value_t = 10 * 1024 * 1024 * 1024 // 10GiB
     )]
     pub max_upload_file_size: u64,
+}
+
+impl Args {
+    pub fn validate(&self) -> Result<(), clap::Error> {
+        if self.session_signing_secret.trim().is_empty() {
+            return Err(Self::command().error(
+                ErrorKind::InvalidValue,
+                "session signing secret must not be empty",
+            ));
+        }
+        if self.session_signing_secret == self.token {
+            return Err(Self::command().error(
+                ErrorKind::InvalidValue,
+                "session signing secret must differ from the static authentication token",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(secret: &str) -> Args {
+        Args::try_parse_from([
+            "cloudsync-server",
+            "--token",
+            "test-static-token",
+            "--session-signing-secret",
+            secret,
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn rejects_empty_signing_secret() {
+        for secret in ["", "   "] {
+            let err = args(secret).validate().unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidValue);
+            assert!(
+                err.to_string()
+                    .contains("session signing secret must not be empty")
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_signing_secret_equal_to_static_token() {
+        let err = args("test-static-token").validate().unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidValue);
+        assert!(
+            err.to_string()
+                .contains("must differ from the static authentication token")
+        );
+        assert!(!err.to_string().contains("test-static-token"));
+    }
+
+    #[test]
+    fn accepts_independent_signing_secret() {
+        assert!(args("independent-session-secret").validate().is_ok());
+    }
 }
