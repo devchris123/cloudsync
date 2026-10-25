@@ -22,14 +22,14 @@ pub fn open_db(db_path: &str) -> anyhow::Result<Database> {
     Ok(db)
 }
 
-pub struct TenantDb {
+pub struct TenantFileMetaDb {
     db: Arc<Database>,
     user_context: UserContext,
 }
 
-impl TenantDb {
+impl TenantFileMetaDb {
     pub fn new(db: Arc<Database>, user_context: UserContext) -> Self {
-        TenantDb { db, user_context }
+        TenantFileMetaDb { db, user_context }
     }
 
     pub fn list(&self) -> Result<Vec<FileMeta>, anyhow::Error> {
@@ -183,8 +183,8 @@ mod test {
         (dir, db)
     }
 
-    fn test_tenant(db: Arc<Database>, tenant_id: Option<String>) -> TenantDb {
-        TenantDb {
+    fn test_tenant(db: Arc<Database>, tenant_id: Option<String>) -> TenantFileMetaDb {
+        TenantFileMetaDb {
             db,
             user_context: UserContext {
                 tenant_id: tenant_id.unwrap_or("tenant1".to_string()),

@@ -8,7 +8,7 @@ use crate::db::tx::Transaction;
 
 pub const TABLE_USAGES: TableDefinition<&str, &[u8]> = TableDefinition::new("usages");
 
-pub struct TenantUserDb {
+pub struct TenantUsageDb {
     #[cfg(test)]
     db: Arc<Database>,
     user_context: UserContext,
@@ -20,9 +20,9 @@ pub struct UsageRecord {
     pub usage: u64,
 }
 
-impl TenantUserDb {
+impl TenantUsageDb {
     pub fn new(_db: Arc<Database>, user_context: UserContext) -> Self {
-        TenantUserDb {
+        TenantUsageDb {
             #[cfg(test)]
             db: _db,
             user_context,
@@ -81,14 +81,14 @@ mod test {
 
     use tempfile::TempDir;
 
-    fn test_db(tenant_id: &str) -> (TempDir, TenantUserDb) {
+    fn test_db(tenant_id: &str) -> (TempDir, TenantUsageDb) {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.redb");
         let db = redb::Database::create(&path).unwrap();
         let tx = db.begin_write().unwrap();
         tx.open_table(TABLE_USAGES).unwrap();
         tx.commit().unwrap();
-        let db = TenantUserDb {
+        let db = TenantUsageDb {
             db: Arc::new(db),
             user_context: UserContext {
                 tenant_id: tenant_id.to_string(),

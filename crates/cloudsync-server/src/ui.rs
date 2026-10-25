@@ -12,7 +12,7 @@ use rust_embed::RustEmbed;
 use sha2::Sha256;
 
 use crate::auth::UserContext;
-use crate::{app::AppState, db::db_file::TenantDb};
+use crate::{app::AppState, db::db_file::TenantFileMetaDb};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -282,7 +282,7 @@ pub async fn browse(
     };
 
     let prefix = query.prefix.unwrap_or_default();
-    let db = TenantDb::new(state.db.clone(), ctx);
+    let db = TenantFileMetaDb::new(state.db.clone(), ctx);
     let all_files = match db.list() {
         Ok(f) => f,
         Err(_) => {
@@ -329,7 +329,7 @@ pub async fn partial_files(
     let prefix = query.prefix.unwrap_or_default();
     let needle = query.q.unwrap_or_default().to_lowercase();
 
-    let db = TenantDb::new(state.db.clone(), ctx);
+    let db = TenantFileMetaDb::new(state.db.clone(), ctx);
     let all_files = match db.list() {
         Ok(f) => f,
         Err(_) => {

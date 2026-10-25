@@ -1,5 +1,5 @@
 use crate::db::tx::Transaction;
-use crate::db::{db_file, db_upload, db_user};
+use crate::db::{db_file, db_upload, db_usage};
 use crate::{auth::UserContext, storage};
 use cloudsync_common::{FileMeta, InitUploadRequest, hash_bytes};
 use redb::{self};
@@ -98,14 +98,14 @@ impl TenantFileService {
     /// # Errors
     /// Returns `ServiceError::NotFound` if the file does not exist.
     pub fn get_file(&self, path: &str) -> Result<FileMeta, ServiceError> {
-        db_file::TenantDb::new(self.db.clone(), self.ctx.clone())
+        db_file::TenantFileMetaDb::new(self.db.clone(), self.ctx.clone())
             .get(path)?
             .ok_or(ServiceError::NotFound)
     }
 
     /// List all files for the current tenant.
     pub fn list_files(&self) -> Result<Vec<FileMeta>, ServiceError> {
-        Ok(db_file::TenantDb::new(self.db.clone(), self.ctx.clone()).list()?)
+        Ok(db_file::TenantFileMetaDb::new(self.db.clone(), self.ctx.clone()).list()?)
     }
 
     /// Marks a file as deleted without removing its stored blob.
@@ -113,7 +113,7 @@ impl TenantFileService {
     /// Succeeds if the path does not exist or is already deleted.
     /// Stored bytes remain charged against the tenant's quota.
     pub fn delete_file(&self, path: &str) -> Result<(), ServiceError> {
-        db_file::TenantDb::new(self.db.clone(), self.ctx.clone()).delete(path)?;
+        db_file::TenantFileMetaDb::new(self.db.clone(), self.ctx.clone()).delete(path)?;
         tracing::info!("file marked as deleted: {}", path);
         Ok(())
     }
@@ -123,11 +123,11 @@ impl TenantFileService {
     /// # Errors
     /// Returns `ServiceError::QuotaExceeded` if the operation would exceed the tenant's storage quota.
     pub fn create_file(&self, path: String, content: &[u8]) -> Result<FileMeta, ServiceError> {
-        let usage_db = db_user::TenantUserDb::new(self.db.clone(), self.ctx.clone());
+        let usage_db = db_usage::TenantUsageDb::new(self.db.clone(), self.ctx.clone());
         let tx = self.db.begin_write().map_err(anyhow::Error::from)?;
         let usage = self.get_usage(&tx)?;
 
-        let db_file = db_file::TenantDb::new(self.db.clone(), self.ctx.clone());
+        let db_file = db_file::TenantFileMetaDb::new(self.db.clone(), self.ctx.clone());
 
         let mut content_hash = hash_bytes(content);
         let content_size = content.len() as u64;
@@ -171,7 +171,7 @@ impl TenantFileService {
     }
 
     fn get_usage(&self, tx: &redb::WriteTransaction) -> anyhow::Result<u64> {
-        let usage_db = db_user::TenantUserDb::new(self.db.clone(), self.ctx.clone());
+        let usage_db = db_usage::TenantUsageDb::new(self.db.clone(), self.ctx.clone());
         let usage = usage_db.get_tx(&Transaction::Write(tx))?;
         let usage = match usage {
             Some(usage) => usage.usage,
@@ -270,7 +270,7 @@ impl TenantFileService {
     pub fn finalize_upload(&self, upload_id: &str) -> Result<FileMeta, ServiceError> {
         let upload_db: db_upload::TenantUploadDb =
             db_upload::TenantUploadDb::new(self.db.clone(), self.ctx.clone());
-        let usage_db = db_user::TenantUserDb::new(self.db.clone(), self.ctx.clone());
+        let usage_db = db_usage::TenantUsageDb::new(self.db.clone(), self.ctx.clone());
 
         let tx = self.db.begin_write().map_err(anyhow::Error::from)?;
 
@@ -320,7 +320,7 @@ impl TenantFileService {
         // `db.put_tx` overwrites any prior row at this path — including a soft-deleted
         // one — bumping `version` and resetting `is_deleted`, so the re-upload of a
         // previously-deleted file lands as a fresh row without special-casing here.
-        let scoped_db = db_file::TenantDb::new(self.db.clone(), self.ctx.clone());
+        let scoped_db = db_file::TenantFileMetaDb::new(self.db.clone(), self.ctx.clone());
         let file = scoped_db.put_tx(&tx, &upload.path, upload.total_size, &upload.total_hash)?;
         upload_db.delete_tx(&tx, upload_id)?;
         tx.commit()?;
@@ -335,7 +335,7 @@ impl TenantFileService {
 mod test {
     use super::*;
     use crate::auth::UserContext;
-    use crate::db::{db_file, db_user};
+    use crate::db::{db_file, db_usage};
     use crate::service::ServiceError::QuotaExceeded;
     use redb::Database;
     use tempfile::TempDir;
@@ -345,7 +345,7 @@ mod test {
         let db =
             Arc::new(db_file::open_db(dir.path().join("test.redb").to_str().unwrap()).unwrap());
         let tx = db.begin_write().unwrap();
-        tx.open_table(db_user::TABLE_USAGES).unwrap();
+        tx.open_table(db_usage::TABLE_USAGES).unwrap();
         tx.commit().unwrap();
         let service = TenantFileService::new(
             db.clone(),
@@ -361,11 +361,11 @@ mod test {
     }
 
     fn finalize_state(db: &Arc<Database>, ctx: &UserContext, upload_id: &str) -> serde_json::Value {
-        let usage_db = db_user::TenantUserDb::new(db.clone(), ctx.clone());
+        let usage_db = db_usage::TenantUsageDb::new(db.clone(), ctx.clone());
         let tx = db.begin_read().unwrap();
         serde_json::json!({
             "usage": usage_db.get_tx(&Transaction::Read(&tx)).unwrap(),
-            "files": db_file::TenantDb::new(db.clone(), ctx.clone()).list().unwrap(),
+            "files": db_file::TenantFileMetaDb::new(db.clone(), ctx.clone()).list().unwrap(),
             "upload": db_upload::TenantUploadDb::new(db.clone(), ctx.clone()).get(upload_id).unwrap(),
         })
     }
@@ -475,7 +475,7 @@ mod test {
         let (_dir, db, mut service) = test_service(11);
         let ctx = service.ctx.clone();
 
-        let usage_db = db_user::TenantUserDb::new(db.clone(), ctx.clone());
+        let usage_db = db_usage::TenantUsageDb::new(db.clone(), ctx.clone());
         let tx = db.begin_read().unwrap();
         let usage = usage_db.get_tx(&Transaction::Read(&tx)).unwrap();
         assert!(usage.is_none());
@@ -616,7 +616,7 @@ mod test {
         let (_dir, db, mut service) = test_service(101);
         let ctx = service.ctx.clone();
 
-        let usage_db = db_user::TenantUserDb::new(db.clone(), ctx.clone());
+        let usage_db = db_usage::TenantUsageDb::new(db.clone(), ctx.clone());
 
         // Initial upload
         let upload_req = InitUploadRequest {
@@ -777,7 +777,7 @@ mod test {
         assert!(res.is_ok(), "finalize_upload failed: {:?}", res.err());
 
         let tx = db.begin_read().unwrap();
-        let usage = db_user::TenantUserDb::new(db.clone(), ctx.clone())
+        let usage = db_usage::TenantUsageDb::new(db.clone(), ctx.clone())
             .get_tx(&Transaction::Read(&tx))
             .unwrap()
             .unwrap();
@@ -792,7 +792,7 @@ mod test {
         assert_eq!(file_meta.tenant_id, ctx.tenant_id);
         assert_eq!(file_meta.user_id, ctx.user_id);
 
-        let persisted = db_file::TenantDb::new(db.clone(), ctx.clone())
+        let persisted = db_file::TenantFileMetaDb::new(db.clone(), ctx.clone())
             .get("testpath")
             .unwrap()
             .unwrap();
@@ -942,7 +942,7 @@ mod test {
         assert!(res.is_ok(), "finalize_upload failed: {:?}", res.err());
 
         let tx = db.begin_read().unwrap();
-        let usage = db_user::TenantUserDb::new(db.clone(), ctx.clone())
+        let usage = db_usage::TenantUsageDb::new(db.clone(), ctx.clone())
             .get_tx(&Transaction::Read(&tx))
             .unwrap()
             .unwrap();
