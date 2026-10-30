@@ -37,14 +37,10 @@ impl TenantFileMetaDb {
         let table = tx.open_table(TABLE_FILES)?;
 
         let mut file_metas: Vec<FileMeta> = Vec::new();
-        for entry in table.iter()? {
-            let (key, val) = entry?;
-            if !key
-                .value()
-                .starts_with(&format!("{}\0", self.user_context.tenant_id))
-            {
-                continue;
-            }
+                    let start = format!("{}\0", self.user_context.tenant_id);
+        let end = format!("{}\u{1}", self.user_context.tenant_id);
+        for entry in table.range(start.as_str()..end.as_str())? {
+            let (_key, val) = entry?;
             let bytes = val.value();
             let file_meta = serde_json::from_slice::<FileMeta>(bytes)?;
             if file_meta.is_deleted {
