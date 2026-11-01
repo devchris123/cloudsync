@@ -8,6 +8,7 @@ pub const DEFAULT_USER_ID: &str = "default-user";
 pub const DEFAULT_OIDC_AUDIENCE: &str = "cloudsync";
 pub const DEFAULT_USER_QUOTA_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const DEFAULT_MAX_TENANT_COUNT: u64 = 10;
+pub const DEFAULT_GC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60); // 1 minute
 
 pub struct OidcConfig {
     pub issuer: String,
@@ -31,6 +32,7 @@ pub struct ServerConfig {
     pub max_upload_file_size: u64,
     pub default_user_quota_bytes: u64,
     pub max_tenant_count: u64,
+    pub gc_interval: std::time::Duration,
 }
 
 impl ServerConfig {
@@ -57,6 +59,7 @@ impl ServerConfig {
             max_upload_file_size: 10 * 1024 * 1024 * 1024, // 10 GiB
             default_user_quota_bytes: DEFAULT_USER_QUOTA_BYTES,
             max_tenant_count: DEFAULT_MAX_TENANT_COUNT,
+            gc_interval: DEFAULT_GC_INTERVAL,
         }
     }
 }

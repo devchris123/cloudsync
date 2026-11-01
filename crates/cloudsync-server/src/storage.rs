@@ -64,6 +64,21 @@ pub fn write(
     Ok(content_hash)
 }
 
+pub fn remove_if_exists(
+    data_dir: &std::path::Path,
+    namespace: &str,
+    content_hash: &str,
+) -> anyhow::Result<bool> {
+    let storage_dir = get_storage_dir(data_dir, namespace, content_hash);
+    let path = storage_dir.join(content_hash);
+    let res = std::fs::remove_file(path);
+    match res {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err.into()),
+    }
+}
+
 /// Returns the path to the file in the storage directory for the given namespace and content hash.
 pub fn get_storage_path(
     data_dir: &std::path::Path,

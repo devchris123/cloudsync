@@ -1,6 +1,9 @@
 use axum::{body::Body, http::Request};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use cloudsync_server::{app::bootstrap_app, config::ServerConfig};
+use cloudsync_server::{
+    app::{bootstrap_state, create_app},
+    config::ServerConfig,
+};
 use hmac::{Hmac, Mac};
 use reqwest::StatusCode;
 use sha2::Sha256;
@@ -47,7 +50,8 @@ fn oidc_cookie(key: &str) -> String {
 #[tokio::test]
 async fn cookies_require_the_session_secret_and_bearer_requires_the_login_token() {
     let dir = tempfile::tempdir().unwrap();
-    let app = bootstrap_app(config(&dir)).unwrap();
+    let state = bootstrap_state(config(&dir)).unwrap();
+    let app = create_app(state);
     for (name, value, expected) in [
         ("Cookie", oidc_cookie(TOKEN), StatusCode::UNAUTHORIZED),
         ("Cookie", static_cookie(TOKEN), StatusCode::UNAUTHORIZED),
@@ -78,7 +82,8 @@ async fn cookies_require_the_session_secret_and_bearer_requires_the_login_token(
 #[tokio::test]
 async fn static_login_issues_cookie_signed_with_session_secret() {
     let dir = tempfile::tempdir().unwrap();
-    let app = bootstrap_app(config(&dir)).unwrap();
+    let state = bootstrap_state(config(&dir)).unwrap();
+    let app = create_app(state);
     let response = app
         .clone()
         .oneshot(

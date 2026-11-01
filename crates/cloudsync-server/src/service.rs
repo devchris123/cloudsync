@@ -1,5 +1,5 @@
 use crate::db::tx::Transaction;
-use crate::db::{db_file, db_upload, db_usage};
+use crate::db::{db_file, db_pending_blob_deletions, db_upload, db_usage};
 use crate::{auth::UserContext, storage};
 use cloudsync_common::{FileMeta, InitUploadRequest, hash_bytes};
 use redb::{self};
@@ -15,6 +15,10 @@ pub enum ServiceError {
 
     //// The request was invalid, e.g., missing required fields or violating constraints.
     Validation(String),
+
+    //// The operation could not be completed due to a conflict,
+    /// e.g. the uploaded blob's hash is currently garbage collected.
+    Conflict(String),
 
     //// An error occurred while interacting with the storage backend.
     Storage(storage::StorageError),
@@ -32,6 +36,7 @@ impl std::fmt::Display for ServiceError {
             ServiceError::QuotaExceeded => write!(f, "quota exceeded"),
             ServiceError::NotFound => write!(f, "not found"),
             ServiceError::Validation(msg) => write!(f, "validation error: {}", msg),
+            ServiceError::Conflict(msg) => write!(f, "conflict error: {}", msg),
             ServiceError::Storage(err) => write!(f, "storage error: {}", err),
             ServiceError::HashMismatch(err) => write!(f, "hash mismatch: {}", err),
             ServiceError::Internal(err) => write!(f, "internal error: {}", err),
@@ -122,7 +127,7 @@ impl TenantFileService {
     ///
     /// # Errors
     /// Returns `ServiceError::QuotaExceeded` if the operation would exceed the tenant's storage quota.
-    pub fn create_file(&self, path: String, content: &[u8]) -> Result<FileMeta, ServiceError> {
+    pub fn create_file(&self, path: &str, content: &[u8]) -> Result<FileMeta, ServiceError> {
         let usage_db = db_usage::TenantUsageDb::new(self.db.clone(), self.ctx.clone());
         let tx = self.db.begin_write().map_err(anyhow::Error::from)?;
         let usage = self.get_usage(&tx)?;
@@ -130,6 +135,18 @@ impl TenantFileService {
         let db_file = db_file::TenantFileMetaDb::new(self.db.clone(), self.ctx.clone());
 
         let mut content_hash = hash_bytes(content);
+
+        // Check if the blob is currently being garbage collected.
+        let pending_del_db =
+            db_pending_blob_deletions::PendingBlobDeletionDb::new(self.ctx.clone());
+        let exists = pending_del_db.exists_tx(&tx, &content_hash)?;
+        if exists {
+            return Err(ServiceError::Conflict(format!(
+                "content hash {} is currently being garbage collected",
+                content_hash
+            )));
+        }
+
         let content_size = content.len() as u64;
         let exist = self.check_quota(&tx, &content_hash, content_size, usage)?;
 
@@ -139,7 +156,7 @@ impl TenantFileService {
         }
 
         tracing::info!("file stored: {} (hash: {})", path, content_hash);
-        let file_meta = db_file.put_tx(&tx, &path, content_size, &content_hash)?;
+        let file_meta = db_file.put_tx(&tx, path, content_size, &content_hash)?;
         tracing::info!("metadata saved: {} (version: {})", path, file_meta.version);
         tx.commit()?;
 
@@ -159,6 +176,17 @@ impl TenantFileService {
     pub fn create_upload(&self, request: InitUploadRequest) -> Result<String, ServiceError> {
         let tx = self.db.begin_write().map_err(anyhow::Error::from)?;
         let usage = self.get_usage(&tx)?;
+
+        // Check if the blob is currently being garbage collected.
+        let pending_del_db =
+            db_pending_blob_deletions::PendingBlobDeletionDb::new(self.ctx.clone());
+        let exists = pending_del_db.exists_tx(&tx, &request.total_hash)?;
+        if exists {
+            return Err(ServiceError::Conflict(format!(
+                "content hash {} is currently being garbage collected",
+                request.total_hash
+            )));
+        }
 
         self.check_quota(&tx, &request.total_hash, request.total_size, usage)?;
 
@@ -337,6 +365,7 @@ mod test {
     use crate::auth::UserContext;
     use crate::db::{db_file, db_usage};
     use crate::service::ServiceError::QuotaExceeded;
+    use crate::service_gc;
     use redb::Database;
     use tempfile::TempDir;
 
@@ -481,7 +510,7 @@ mod test {
         assert!(usage.is_none());
 
         // New path, new content -> succeed and increase usage
-        let file_meta = service.create_file("testpath".to_string(), b"testcontent");
+        let file_meta = service.create_file("testpath", b"testcontent");
 
         // New path, new content -> succeed and increase usage
         assert!(file_meta.is_ok());
@@ -491,21 +520,21 @@ mod test {
 
         service.default_user_quota_bytes = 22;
 
-        let file_meta = service.create_file("testpath2".to_string(), b"tsetcontent");
+        let file_meta = service.create_file("testpath2", b"tsetcontent");
         assert!(file_meta.is_ok());
         let tx = db.begin_read().unwrap();
         let usage = usage_db.get_tx(&Transaction::Read(&tx)).unwrap().unwrap();
         assert_eq!(usage.usage, 22);
 
         // new path, old content -> succeed and keep usage the same
-        let file_meta = service.create_file("testpath3".to_string(), b"tsetcontent");
+        let file_meta = service.create_file("testpath3", b"tsetcontent");
         assert!(file_meta.is_ok());
         let tx = db.begin_read().unwrap();
         let usage = usage_db.get_tx(&Transaction::Read(&tx)).unwrap().unwrap();
         assert_eq!(usage.usage, 22);
 
         // existing path, new content, limited quota -> fails with QuotaExceeded
-        let file_meta = service.create_file("testpath3".to_string(), b"newcontent");
+        let file_meta = service.create_file("testpath3", b"newcontent");
         assert!(file_meta.is_err());
         assert!(matches!(
             file_meta.err().unwrap(),
@@ -527,7 +556,7 @@ mod test {
         // existing path, new content -> succeed and increase usage
         service.default_user_quota_bytes = 32;
 
-        let file_meta = service.create_file("testpath3".to_string(), b"newcontent");
+        let file_meta = service.create_file("testpath3", b"newcontent");
         assert!(file_meta.is_ok());
         let tx = db.begin_read().unwrap();
         let usage = usage_db.get_tx(&Transaction::Read(&tx)).unwrap().unwrap();
@@ -538,7 +567,7 @@ mod test {
     fn test_create_file_rejects_exceeded_quota() {
         let (_dir, _db, service) = test_service(2);
 
-        let file_meta = service.create_file("testpath".to_string(), b"123");
+        let file_meta = service.create_file("testpath", b"123");
 
         assert!(file_meta.is_err());
         assert!(matches!(
@@ -563,7 +592,7 @@ mod test {
 
         service.default_user_quota_bytes = 100;
 
-        let file_meta = service.create_file("testpath".to_string(), b"123");
+        let file_meta = service.create_file("testpath", b"123");
 
         assert!(file_meta.is_err());
         assert!(matches!(
@@ -577,9 +606,7 @@ mod test {
         let (_dir, _db, service) = test_service(10);
 
         // Direct upload
-        service
-            .create_file("testpath".to_string(), b"abcd")
-            .unwrap();
+        service.create_file("testpath", b"abcd").unwrap();
 
         // Chunked pending upload
         let upload_req = InitUploadRequest {
@@ -603,7 +630,7 @@ mod test {
         assert!(upload.is_err());
         assert!(matches!(upload.err().unwrap(), ServiceError::QuotaExceeded));
 
-        let file_meta = service.create_file("testpath3".to_string(), b"lmn");
+        let file_meta = service.create_file("testpath3", b"lmn");
         assert!(file_meta.is_err());
         assert!(matches!(
             file_meta.err().unwrap(),
@@ -920,9 +947,7 @@ mod test {
         let ctx = service.ctx.clone();
 
         // Write file to storage to simulate existing file
-        service
-            .create_file("existing-path".to_string(), b"abc123")
-            .unwrap();
+        service.create_file("existing-path", b"abc123").unwrap();
 
         // Initial upload
         let upload_req = InitUploadRequest {
@@ -1028,5 +1053,59 @@ mod test {
             res.as_ref().err()
         );
         assert_eq!(finalize_state(&db, &ctx, &upload_id), before);
+    }
+
+    #[test]
+    fn test_create_file_blob_with_existing_pending_deletion_throws_an_error() {
+        let (_dir, db, service) = test_service(10);
+        let ctx = service.ctx.clone();
+
+        // Create a file and delete it
+        service.create_file("testpath", b"abc").unwrap();
+        service.delete_file("testpath").unwrap();
+
+        // mark the file as deleted in the database
+        let marked = service_gc::mark_blobs_for_garbage_collection(
+            &_dir.path().join("storage"),
+            db.clone(),
+            &ctx.tenant_id,
+        )
+        .unwrap();
+
+        assert_eq!(marked.len(), 1);
+
+        // Attempt to create a new file with the same content hash as the deleted file
+        let result = service.create_file("newpath", b"abc");
+        assert!(matches!(result, Err(ServiceError::Conflict(_))));
+    }
+
+    #[test]
+    fn test_create_upload_with_existing_pending_deletion_throws_an_error() {
+        let (_dir, db, service) = test_service(10);
+        let ctx = service.ctx.clone();
+
+        // Create a file and delete it
+        service.create_file("testpath", b"abc").unwrap();
+        service.delete_file("testpath").unwrap();
+
+        // mark the file as deleted in the database
+        let marked = service_gc::mark_blobs_for_garbage_collection(
+            &_dir.path().join("storage"),
+            db.clone(),
+            &ctx.tenant_id,
+        )
+        .unwrap();
+
+        assert_eq!(marked.len(), 1);
+
+        // Attempt to create a new upload with the same content hash as the deleted file
+        let upload_req = InitUploadRequest {
+            path: "newpath".to_string(),
+            total_size: 3,
+            total_hash: hash_bytes(b"abc"),
+            chunk_count: 1,
+        };
+        let result = service.create_upload(upload_req);
+        assert!(matches!(result, Err(ServiceError::Conflict(_))));
     }
 }

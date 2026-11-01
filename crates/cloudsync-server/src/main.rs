@@ -4,6 +4,9 @@ mod cli;
 
 use cloudsync_server::app;
 use cloudsync_server::config;
+use cloudsync_server::service_gc;
+
+use tokio::signal::unix::{SignalKind, signal};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -16,16 +19,61 @@ async fn main() -> anyhow::Result<()> {
     log_auth_posture(&config);
     log_base_url_posture(&config);
 
-    // Start server
+    // Prepare signals
+    let mut sigterm = signal(SignalKind::terminate())?;
+
     let host = config.host.clone();
     let port = config.port;
-    let app = app::bootstrap_app(config).unwrap();
-    let listener = tokio::net::TcpListener::bind(format!("{}:{}", host, port))
-        .await
-        .unwrap();
+    let gc_interval = config.gc_interval;
+
+    // Bind listener
+    let state = app::bootstrap_state(config)?;
+    let app = app::create_app(state.clone());
+    let listener = tokio::net::TcpListener::bind(format!("{}:{}", host, port)).await?;
+
+    // Start GC
+    let gc_cancel_token = tokio_util::sync::CancellationToken::new();
+    let gc_handle = tokio::spawn(app::run_garbage_collector(
+        gc_interval,
+        state.db.clone(),
+        state.storage_dir.clone(),
+        gc_cancel_token.clone(),
+        std::sync::Arc::new(service_gc::garbage_collect_deleted_blobs),
+    ));
+
+    // Start server
+    let gc_shutdown_cancel_token = gc_cancel_token.clone();
     tracing::info!("server listening on {}:{}", host, port);
-    axum::serve(listener, app).await.unwrap();
-    Ok(())
+    let serve_result = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => {
+                    if let Err(err) = result {
+                        tracing::error!(error = ?err, "signal listener failed");
+                    } else {
+                        tracing::info!("received Ctrl+C, shutting down server");
+                    }
+                }
+                _ = sigterm.recv() => {
+                    tracing::info!("received SIGTERM, shutting down server");
+                }
+            };
+            gc_shutdown_cancel_token.cancel();
+        })
+        .await;
+
+    if let Err(err) = &serve_result {
+        tracing::error!(error = ?err, "server error: shutting down application");
+    }
+
+    gc_cancel_token.cancel();
+    let result = gc_handle.await;
+    if let Err(err) = result {
+        tracing::error!(error = ?err, "failed to finish garbage collection task");
+    } else {
+        tracing::debug!("succesfully shut down GC");
+    }
+    Ok(serve_result?)
 }
 
 /// Log which auth mechanisms are active so the deployed posture is visible
@@ -116,6 +164,7 @@ fn create_config(args: cli::Args) -> config::ServerConfig {
             _ => None,
         },
         max_upload_file_size: args.max_upload_file_size,
+        gc_interval: std::time::Duration::from_millis(args.gc_interval),
     }
 }
 
@@ -142,6 +191,7 @@ mod tests {
             oidc_client_id: None,
             max_upload_file_size: 100,
             max_tenant_count: 10,
+            gc_interval: config::DEFAULT_GC_INTERVAL.as_secs(),
         };
 
         let config = create_config(args);
@@ -180,6 +230,7 @@ mod tests {
             oidc_client_id: None,
             max_upload_file_size: 100,
             max_tenant_count: 10,
+            gc_interval: config::DEFAULT_GC_INTERVAL.as_secs(),
         };
 
         let config = create_config(args);
@@ -218,6 +269,7 @@ mod tests {
             oidc_client_id: Some("cloudsync-web".to_string()),
             max_upload_file_size: 100,
             max_tenant_count: 10,
+            gc_interval: config::DEFAULT_GC_INTERVAL.as_secs(),
         };
 
         let config = create_config(args);

@@ -73,6 +73,38 @@ impl TenantUsageDb {
         }
         Ok(user_record)
     }
+
+    pub fn decrement_tx(
+        &self,
+        tx: &redb::WriteTransaction,
+        usage: u64,
+    ) -> anyhow::Result<UsageRecord> {
+        let tenant_id = self.user_context.tenant_id.as_str();
+        let mut user_record = {
+            let table = tx.open_table(TABLE_USAGES)?;
+            let entry = table.get(tenant_id)?;
+            let Some(entry) = entry else {
+                return Err(anyhow::anyhow!("not found"));
+            };
+            let bytes = entry.value();
+            serde_json::from_slice::<UsageRecord>(bytes)?
+        };
+        user_record.usage = user_record.usage.checked_sub(usage).ok_or_else(|| {
+            tracing::error!(
+                "usage underflow: tenant {} has usage {}, cannot decrement by {}",
+                tenant_id,
+                user_record.usage,
+                usage
+            );
+            anyhow::anyhow!("usage account underflow")
+        })?;
+        {
+            let mut table = tx.open_table(TABLE_USAGES)?;
+            let bytes = serde_json::to_vec(&user_record)?;
+            table.insert(tenant_id, bytes.as_slice())?;
+        }
+        Ok(user_record)
+    }
 }
 
 #[cfg(test)]

@@ -30,7 +30,7 @@ async fn test_push_and_pull() {
         .to_str()
         .unwrap()
         .to_string();
-    let server = cloudsync_server::app::bootstrap_app(ServerConfig {
+    let state = cloudsync_server::app::bootstrap_state(ServerConfig {
         port: 0,
         storage_dir: storage_dir_str,
         staging_dir: staging_dir_str,
@@ -40,6 +40,7 @@ async fn test_push_and_pull() {
         ..ServerConfig::new(token.to_string())
     })
     .unwrap();
+    let server = cloudsync_server::app::create_app(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
