@@ -119,6 +119,14 @@ pub struct Args {
         default_value_t = config::DEFAULT_MAX_TENANT_COUNT
     )]
     pub max_tenant_count: u64,
+
+    #[arg(
+        long,
+        env = "CLOUDSYNC_GC_INTERVAL_SECONDS",
+        help = "Interval between garbage collection runs (in seconds)",
+        default_value_t = config::DEFAULT_GC_INTERVAL.as_secs()
+    )]
+    pub gc_interval: u64,
 }
 
 impl Args {

@@ -1,5 +1,8 @@
 use anyhow::Context;
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     Json, Router,
@@ -86,6 +89,9 @@ impl From<service::ServiceError> for AppError {
             service::ServiceError::Validation(msg) => {
                 AppError(anyhow::anyhow!(msg), StatusCode::BAD_REQUEST)
             }
+            service::ServiceError::Conflict(msg) => {
+                AppError(anyhow::anyhow!(msg), StatusCode::CONFLICT)
+            }
             service::ServiceError::HashMismatch(_err) => AppError(
                 anyhow::anyhow!("uploaded content does not match the declared hash".to_string()),
                 StatusCode::BAD_REQUEST,
@@ -165,7 +171,7 @@ async fn post_file(
         state.staging_dir,
         state.default_user_quota_bytes,
     )
-    .create_file(path, &content)
+    .create_file(&path, &content)
     .inspect_err(|err| match err {
         service::ServiceError::QuotaExceeded
         | service::ServiceError::HashMismatch(_)
@@ -546,6 +552,105 @@ fn admit_tenant(db: Arc<Database>, tenant_id: &str, max_tenant_count: u64) -> an
     Ok(true)
 }
 
+pub fn bootstrap_app(config: ServerConfig) -> anyhow::Result<Router> {
+    let state = bootstrap_state(config)?;
+    let app = create_app(state);
+    Ok(app)
+}
+
+pub fn bootstrap_state(config: ServerConfig) -> anyhow::Result<AppState> {
+    let db = create_db(&config)?;
+    let state = create_state(db, config);
+    Ok(state)
+}
+
+fn create_db(config: &ServerConfig) -> anyhow::Result<Arc<Database>> {
+    let db = db_file::open_db(&config.dbname).context("faild to open database")?;
+    let db = Arc::new(db);
+    migrations::run_migrations(&db, &config.default_tenant_id, &config.default_user_id)
+        .context("failed to migrate database")?;
+    Ok(db)
+}
+
+fn create_state(db: Arc<Database>, config: ServerConfig) -> AppState {
+    let (oidc, oidc_client) = match config.oidc_config {
+        Some(cfg) => (
+            Some(Arc::new(OidcValidator::new(
+                cfg.issuer,
+                cfg.discovery_url,
+                cfg.audience,
+            ))),
+            Some(OidcClient {
+                client_id: cfg.client_id,
+            }),
+        ),
+        None => (None, None),
+    };
+    AppState {
+        db,
+        storage_dir: std::path::PathBuf::from(&config.storage_dir),
+        staging_dir: std::path::PathBuf::from(&config.staging_dir),
+        token: config.token,
+        session_signing_secret: config.session_signing_secret,
+        default_tenant_id: config.default_tenant_id,
+        default_user_id: config.default_user_id,
+        default_user_quota_bytes: config.default_user_quota_bytes,
+        oidc,
+        oidc_client,
+        max_upload_file_size: config.max_upload_file_size,
+        max_tenant_count: config.max_tenant_count,
+    }
+}
+
+pub async fn run_garbage_collector(
+    interval: Duration,
+    db: Arc<Database>,
+    storage_dir: std::path::PathBuf,
+    shutdown: tokio_util::sync::CancellationToken,
+    garbage_collect_deleted_blobs: Arc<
+        impl Fn(&std::path::Path, Arc<Database>) -> anyhow::Result<Vec<String>> + Send + Sync + 'static,
+    >,
+) {
+    loop {
+        let storage_dir = storage_dir.clone();
+        let db = db.clone();
+        let gc_shutdown = shutdown.clone();
+        let cloned_garbage_collect_deleted_blobs = garbage_collect_deleted_blobs.clone();
+        let join_res: Result<(), tokio::task::JoinError> = tokio::task::spawn_blocking(move || {
+            if gc_shutdown.is_cancelled() {
+                return;
+            }
+            let started = Instant::now();
+            let result = cloned_garbage_collect_deleted_blobs(&storage_dir, db);
+            match result {
+                Err(err) => {
+                    tracing::error!(error = ?err, "failed to run blob garbage collection");
+                }
+                Ok(deleted) => {
+                    tracing::info!(
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        deleted_blobs = deleted.len(),
+                        "garbage collection completed"
+                    )
+                }
+            }
+        })
+        .await;
+        if let Err(err) = join_res {
+            tracing::error!(error = ?err, "failed to finish blob garbage collection");
+        }
+        tracing::debug!(
+            interval = ?interval,
+            "finished garbage collection iteration, sleeping until next iteration"
+        );
+
+        tokio::select! {
+            _ =             tokio::time::sleep(interval) => {}
+            _ = shutdown.cancelled() => break,
+        }
+    }
+}
+
 pub fn create_app(state: AppState) -> Router {
     // API routes with Bearer token / cookie auth
     let auth_router = Router::<AppState>::new()
@@ -628,47 +733,15 @@ pub fn create_app(state: AppState) -> Router {
         .with_state(state)
 }
 
-pub fn bootstrap_app(config: ServerConfig) -> anyhow::Result<Router> {
-    let db = db_file::open_db(&config.dbname)?;
-
-    // Run migrations
-    migrations::run_migrations(&db, &config.default_tenant_id, &config.default_user_id)?;
-
-    let db = Arc::new(db);
-    let (oidc, oidc_client) = match config.oidc_config {
-        Some(cfg) => (
-            Some(Arc::new(OidcValidator::new(
-                cfg.issuer,
-                cfg.discovery_url,
-                cfg.audience,
-            ))),
-            Some(OidcClient {
-                client_id: cfg.client_id,
-            }),
-        ),
-        None => (None, None),
-    };
-    let state = AppState {
-        db,
-        storage_dir: std::path::PathBuf::from(&config.storage_dir),
-        staging_dir: std::path::PathBuf::from(&config.staging_dir),
-        token: config.token,
-        session_signing_secret: config.session_signing_secret,
-        default_tenant_id: config.default_tenant_id,
-        default_user_id: config.default_user_id,
-        default_user_quota_bytes: config.default_user_quota_bytes,
-        oidc,
-        oidc_client,
-        max_upload_file_size: config.max_upload_file_size,
-        max_tenant_count: config.max_tenant_count,
-    };
-    let app = create_app(state);
-    Ok(app)
-}
-
 #[cfg(test)]
 mod tests {
     use cloudsync_common::hash_bytes;
+    use tempfile::TempDir;
+
+    use crate::db::{
+        db_file::{INDEX_FILES_BY_TENANT_HASH, TABLE_FILES},
+        db_tenants::TABLE_TENANTS,
+    };
 
     use super::*;
 
@@ -756,5 +829,274 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn test_db() -> (TempDir, Arc<Database>) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.redb");
+        let db = redb::Database::create(&path).unwrap();
+        let tx = db.begin_write().unwrap();
+        tx.open_table(TABLE_FILES).unwrap();
+        tx.open_table(TABLE_TENANTS).unwrap();
+        tx.open_multimap_table(INDEX_FILES_BY_TENANT_HASH).unwrap();
+        tx.commit().unwrap();
+        (dir, std::sync::Arc::new(db))
+    }
+
+    #[tokio::test]
+    async fn test_run_garbage_collector_cancel_token_then_returns_immediately() {
+        let (dir, db) = test_db();
+        let interval = Duration::from_secs(1);
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        let callback = move |_data_dir: &std::path::Path, _db: Arc<redb::Database>| {
+            let vec = vec![];
+            Ok(vec)
+        };
+        run_garbage_collector(
+            interval,
+            db.clone(),
+            dir.path().to_path_buf(),
+            token.clone(),
+            std::sync::Arc::new(callback),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_run_garbage_collector_cancel_during_active_run_then_finishes_and_returns() {
+        let (dir, db) = test_db();
+        let interval = Duration::from_secs(1);
+        let token = tokio_util::sync::CancellationToken::new();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Mutex::new(release_rx);
+
+        let callback = move |_data_dir: &std::path::Path, _db: Arc<redb::Database>| {
+            tx.blocking_send(()).unwrap();
+            release_rx.lock().unwrap().recv().unwrap();
+            let vec = vec![];
+            Ok(vec)
+        };
+
+        let mut handle = tokio::spawn(run_garbage_collector(
+            interval,
+            db.clone(),
+            dir.path().to_path_buf(),
+            token.clone(),
+            std::sync::Arc::new(callback),
+        ));
+
+        rx.recv().await.unwrap();
+        token.cancel();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut handle)
+                .await
+                .is_err()
+        );
+
+        release_tx.send(()).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_run_garbage_collector_callback_error_then_continues() {
+        let (dir, db) = test_db();
+        let interval = Duration::from_secs(0);
+        let token = tokio_util::sync::CancellationToken::new();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let rx = std::sync::Mutex::new(rx);
+        let (cb_tx, mut cb_rx) = tokio::sync::mpsc::channel(10);
+
+        let callback = move |_data_dir: &std::path::Path, _db: Arc<redb::Database>| {
+            let res = rx.lock().unwrap().recv()?;
+            cb_tx.blocking_send(()).unwrap();
+            res?;
+            let vec = vec![];
+            Ok(vec)
+        };
+
+        let handle = tokio::spawn(run_garbage_collector(
+            interval,
+            db.clone(),
+            dir.path().to_path_buf(),
+            token.clone(),
+            std::sync::Arc::new(callback),
+        ));
+
+        tx.send(Err(anyhow::anyhow!("error"))).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), cb_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        tx.send(Ok(())).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), cb_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        drop(tx);
+        token.cancel();
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_run_garbage_collector_runs_do_not_overlap() {
+        let (dir, db) = test_db();
+        let interval = Duration::from_millis(10);
+        let token = tokio_util::sync::CancellationToken::new();
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Mutex::new(release_rx);
+
+        let callback = move |_data_dir: &std::path::Path, _db: Arc<redb::Database>| {
+            // Signal before taking the mutex, so it cannot conceal overlapping runs.
+            started_tx.send(())?;
+            release_rx.lock().unwrap().recv()?;
+            Ok(vec![])
+        };
+
+        let handle = tokio::spawn(run_garbage_collector(
+            interval,
+            db,
+            dir.path().to_path_buf(),
+            token.clone(),
+            Arc::new(callback),
+        ));
+
+        tokio::time::timeout(Duration::from_secs(2), started_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Hold the first run open across several scheduling intervals.
+        let second_run_while_blocked =
+            tokio::time::timeout(Duration::from_millis(100), started_rx.recv()).await;
+
+        release_tx.send(()).unwrap();
+        let next_run = tokio::time::timeout(Duration::from_secs(2), started_rx.recv()).await;
+
+        token.cancel();
+        // Release any active callback, including one started just before cancellation.
+        drop(release_tx);
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(second_run_while_blocked.is_err(), "GC runs overlapped");
+        assert_eq!(next_run.unwrap(), Some(()));
+    }
+
+    #[tokio::test]
+    async fn test_tokio_oneshot() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        let handle = tokio::spawn(async move {
+            let send_res = tx.send(10);
+            if let Err(err) = send_res {
+                println!("error sending value: {:?}", err)
+            }
+        });
+
+        match rx.await {
+            Ok(value) => {
+                println!("successfully received send value: {}", value);
+                assert_eq!(10, value);
+            }
+            Err(err) => println!("failed to receive value: {:?}", err),
+        }
+
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_tokio_mpsc_buffered() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+
+        let handle = tokio::spawn(async move {
+            tx.send(10).await.unwrap();
+            tx.send(20).await.unwrap();
+        });
+        let rcved0 = rx.recv().await.unwrap();
+        assert_eq!(10, rcved0);
+        let rcved1 = rx.recv().await.unwrap();
+        assert_eq!(20, rcved1);
+
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_tokio_mpsc_buffered_2() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+
+        let handle = tokio::spawn(async move {
+            let rcved0 = rx.recv().await.unwrap();
+            assert_eq!(10, rcved0);
+            let rcved1 = rx.recv().await.unwrap();
+            assert_eq!(20, rcved1);
+        });
+
+        tx.send(10).await.unwrap();
+        tx.send(20).await.unwrap();
+
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_tokio_mpsc_buffer_full_then_send_blocks() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+
+        let mut handle = tokio::spawn(async move {
+            tx.send(10).await.unwrap();
+            started_tx.send(()).unwrap();
+            tx.send(20).await.unwrap();
+        });
+
+        started_rx.await.unwrap();
+
+        tokio::select! {
+            result = &mut handle => {
+                 panic!("task finished unexpectedly: {result:?}");
+            }
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+
+        assert_eq!(rx.recv().await.unwrap(), 10);
+        handle.await.unwrap();
+        assert_eq!(rx.recv().await.unwrap(), 20);
+    }
+
+    #[test]
+    fn test_std_mspc() {
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        tx.send(10).unwrap();
+        let val = rx.recv().unwrap();
+
+        assert_eq!(val, 10);
+    }
+
+    #[tokio::test]
+    async fn test_tokio_watch() {
+        let (tx, rx) = tokio::sync::watch::channel(0);
+
+        tx.send(10).unwrap();
+        tx.send(20).unwrap();
+
+        let value = rx.borrow();
+        assert_eq!(*value, 20);
     }
 }

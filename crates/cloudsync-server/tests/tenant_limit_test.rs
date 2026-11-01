@@ -1,6 +1,9 @@
 use axum::{body::Body, http::Request};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use cloudsync_server::{app::bootstrap_app, config::ServerConfig};
+use cloudsync_server::{
+    app::{bootstrap_state, create_app},
+    config::ServerConfig,
+};
 use hmac::{Hmac, Mac};
 use reqwest::StatusCode;
 use sha2::Sha256;
@@ -35,7 +38,8 @@ async fn unauthenticated_requests_keep_existing_auth_behavior() {
 
 fn test_app(max_tenant_count: u64) -> (tempfile::TempDir, axum::Router) {
     let dir = tempfile::tempdir().unwrap();
-    let app = bootstrap_app(ServerConfig {
+    let state = bootstrap_state(ServerConfig {
+        port: 0,
         storage_dir: dir.path().join("files").to_str().unwrap().into(),
         staging_dir: dir.path().join("staging").to_str().unwrap().into(),
         dbname: dir.path().join("server.redb").to_str().unwrap().into(),
@@ -44,6 +48,7 @@ fn test_app(max_tenant_count: u64) -> (tempfile::TempDir, axum::Router) {
         ..ServerConfig::new(TOKEN.into())
     })
     .unwrap();
+    let app = create_app(state);
     (dir, app)
 }
 

@@ -41,4 +41,16 @@ impl TenantDb {
         }
         Ok(rec)
     }
+
+    pub fn list(&self, tx: &redb::ReadTransaction) -> anyhow::Result<Vec<TenantRecord>> {
+        let table = tx.open_table(TABLE_TENANTS)?;
+        let mut tenants: Vec<TenantRecord> = Vec::new();
+        for entry in table.iter()? {
+            let (_key, val) = entry?;
+            let bytes = val.value();
+            let tenant_record = serde_json::from_slice::<TenantRecord>(bytes)?;
+            tenants.push(tenant_record);
+        }
+        Ok(tenants)
+    }
 }

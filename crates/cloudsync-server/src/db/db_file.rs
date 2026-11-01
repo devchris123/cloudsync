@@ -1,22 +1,21 @@
 use std::sync::Arc;
 
 use cloudsync_common::FileMeta;
-use redb::{Database, ReadableTable, Table, TableDefinition};
+use redb::{Database, MultimapTableDefinition, ReadableTable, Table, TableDefinition};
 
 use crate::{auth::UserContext, db::db_upload::TABLE_UPLOADS};
 
 pub const TABLE_FILES: TableDefinition<&str, &[u8]> = TableDefinition::new("files");
+pub const INDEX_FILES_BY_TENANT_HASH: MultimapTableDefinition<&str, &[u8]> =
+    MultimapTableDefinition::new("files_by_tenant_hash");
 
 pub fn open_db(db_path: &str) -> anyhow::Result<Database> {
     let db: Database = Database::create(db_path)?;
     let tx = db.begin_write()?;
     {
         tx.open_table(TABLE_FILES)?;
-    }
-    tx.commit()?;
-    let tx = db.begin_write()?;
-    {
         tx.open_table(TABLE_UPLOADS)?;
+        tx.open_multimap_table(INDEX_FILES_BY_TENANT_HASH)?;
     }
     tx.commit()?;
     Ok(db)
@@ -37,7 +36,7 @@ impl TenantFileMetaDb {
         let table = tx.open_table(TABLE_FILES)?;
 
         let mut file_metas: Vec<FileMeta> = Vec::new();
-                    let start = format!("{}\0", self.user_context.tenant_id);
+        let start = format!("{}\0", self.user_context.tenant_id);
         let end = format!("{}\u{1}", self.user_context.tenant_id);
         for entry in table.range(start.as_str()..end.as_str())? {
             let (_key, val) = entry?;
@@ -54,6 +53,15 @@ impl TenantFileMetaDb {
 
     pub fn get(&self, path: &str) -> Result<Option<FileMeta>, anyhow::Error> {
         let tx = self.db.begin_read()?;
+        let table = tx.open_table(TABLE_FILES)?;
+        self.get_table(&table, path)
+    }
+
+    pub fn get_tx(
+        &self,
+        tx: &redb::WriteTransaction,
+        path: &str,
+    ) -> Result<Option<FileMeta>, anyhow::Error> {
         let table = tx.open_table(TABLE_FILES)?;
         self.get_table(&table, path)
     }
@@ -76,10 +84,7 @@ impl TenantFileMetaDb {
     #[cfg(test)]
     pub fn put(&self, path: &str, size: u64, content_hash: &str) -> anyhow::Result<FileMeta> {
         let tx = self.db.begin_write()?;
-        let file_meta = {
-            let mut table = tx.open_table(TABLE_FILES)?;
-            self.put_table(&mut table, path, size, content_hash)?
-        };
+        let file_meta = self.put_tx(&tx, path, size, content_hash)?;
         tx.commit()?;
         Ok(file_meta)
     }
@@ -93,13 +98,21 @@ impl TenantFileMetaDb {
     ) -> anyhow::Result<FileMeta> {
         let file_meta = {
             let mut table = tx.open_table(TABLE_FILES)?;
-            self.put_table(&mut table, path, size, content_hash)?
+            self.put_table(tx, &mut table, path, size, content_hash)?
         };
+        let keyed_path = self.make_key(path);
+        let index_key = make_index_key(&self.user_context.tenant_id, content_hash);
+        {
+            let mut table = tx.open_multimap_table(INDEX_FILES_BY_TENANT_HASH)?;
+            table.insert(index_key.as_str(), keyed_path.as_bytes())?;
+        }
+
         Ok(file_meta)
     }
 
     fn put_table(
         &self,
+        tx: &redb::WriteTransaction,
         table: &mut Table<'_, &'static str, &'static [u8]>,
         path: &str,
         size: u64,
@@ -122,9 +135,14 @@ impl TenantFileMetaDb {
             let entry = table.get(keyed_path.as_str())?;
             if let Some(entry) = entry {
                 let bytes = entry.value();
-                let file_meta_raw = serde_json::from_slice::<FileMeta>(bytes)?;
-                file_meta.version = file_meta_raw.version + 1;
-                file_meta.created_at = file_meta_raw.created_at;
+                let file_meta_old = serde_json::from_slice::<FileMeta>(bytes)?;
+                file_meta.version = file_meta_old.version + 1;
+                file_meta.created_at = file_meta_old.created_at;
+                // If an entry exists we need to update the index
+                let old_hash = file_meta_old.content_hash;
+                let index_key = make_index_key(&self.user_context.tenant_id, &old_hash);
+                let mut table = tx.open_multimap_table(INDEX_FILES_BY_TENANT_HASH)?;
+                table.remove(index_key.as_str(), keyed_path.as_bytes())?;
             }
         }
 
@@ -158,8 +176,22 @@ impl TenantFileMetaDb {
     }
 
     fn make_key(&self, path: &str) -> String {
-        format!("{}\0{}", self.user_context.tenant_id, path)
+        make_key(&self.user_context.tenant_id, path)
     }
+}
+
+pub fn make_key(tenant_id: &str, path: &str) -> String {
+    format!("{}\0{}", tenant_id, path)
+}
+
+pub fn make_index_key(tenant_id: &str, hash: &str) -> String {
+    format!("{}\0{}", tenant_id, hash)
+}
+
+#[cfg(test)]
+pub fn decode_key(key: &str) -> anyhow::Result<(&str, &str)> {
+    key.split_once('\0')
+        .ok_or_else(|| anyhow::anyhow!("invalid key"))
 }
 
 #[cfg(test)]
@@ -269,5 +301,116 @@ mod test {
         assert!(pathb.is_none());
         let patha = tenantb.get("tenanta/test.txt").unwrap();
         assert!(patha.is_none());
+    }
+
+    #[test]
+    fn put_tx_adds_index() {
+        let (_dir, db) = test_db();
+        let tenanta_name = "tenanta".to_string();
+        let arc_db = Arc::new(db);
+        let tenanta = test_tenant(Arc::clone(&arc_db), Some(tenanta_name.clone()));
+
+        let path = "tenantb/test.txt";
+        let bytes = b"hello world";
+        let hash = hash_bytes(bytes);
+        let tx = arc_db.begin_write().unwrap();
+        tenanta
+            .put_tx(&tx, path, bytes.len() as u64, &hash)
+            .unwrap();
+
+        let path2 = "tenantb/test2.txt";
+        tenanta
+            .put_tx(&tx, path2, bytes.len() as u64, &hash)
+            .unwrap();
+
+        tx.commit().unwrap();
+
+        let tx = arc_db.begin_read().unwrap();
+        let table = tx.open_multimap_table(INDEX_FILES_BY_TENANT_HASH).unwrap();
+        let index_key = make_index_key(&tenanta_name, &hash);
+        let mut value_map = table.get(index_key.as_str()).unwrap();
+
+        assert_eq!(value_map.len(), 2);
+        let value = value_map.next().unwrap().unwrap();
+        let value = std::str::from_utf8(value.value()).unwrap();
+        let (dec_tenant_id, dec_path) = decode_key(value).unwrap();
+        assert_eq!(dec_tenant_id, tenanta_name);
+        assert_eq!(dec_path, path);
+
+        let value = value_map.next().unwrap().unwrap();
+        let value = std::str::from_utf8(value.value()).unwrap();
+        let (dec_tenant_id, dec_path) = decode_key(value).unwrap();
+        assert_eq!(dec_tenant_id, tenanta_name);
+        assert_eq!(dec_path, path2);
+    }
+
+    #[test]
+    fn put_tx_updates_index() {
+        let (_dir, db) = test_db();
+        let tenanta_name = "tenanta".to_string();
+        let arc_db = Arc::new(db);
+        let tenanta = test_tenant(Arc::clone(&arc_db), Some(tenanta_name.clone()));
+
+        let path = "tenantb/test.txt";
+        let bytes = b"hello world";
+        let hash = hash_bytes(bytes);
+        let tx = arc_db.begin_write().unwrap();
+        tenanta
+            .put_tx(&tx, path, bytes.len() as u64, &hash)
+            .unwrap();
+        let updated_bytes = b"hello world2";
+        let updated_hash = hash_bytes(updated_bytes);
+        tenanta
+            .put_tx(&tx, path, updated_bytes.len() as u64, &updated_hash)
+            .unwrap();
+        tx.commit().unwrap();
+
+        let tx = arc_db.begin_read().unwrap();
+        let table = tx.open_multimap_table(INDEX_FILES_BY_TENANT_HASH).unwrap();
+
+        let index_key = make_index_key(&tenanta_name, &hash);
+        let value_map = table.get(index_key.as_str()).unwrap();
+        assert_eq!(value_map.len(), 0);
+
+        let index_key = make_index_key(&tenanta_name, &updated_hash);
+        let mut value_map = table.get(index_key.as_str()).unwrap();
+        assert_eq!(value_map.len(), 1);
+
+        let value = value_map.next().unwrap().unwrap();
+        let value = std::str::from_utf8(value.value()).unwrap();
+        let (dec_tenant_id, dec_path) = decode_key(value).unwrap();
+        assert_eq!(dec_tenant_id, tenanta_name);
+        assert_eq!(dec_path, path);
+    }
+
+    #[test]
+    fn delete_tx_keeps_index() {
+        let (_dir, db) = test_db();
+        let tenanta_name = "tenanta".to_string();
+        let arc_db = Arc::new(db);
+        let tenanta = test_tenant(Arc::clone(&arc_db), Some(tenanta_name.clone()));
+
+        let path = "tenantb/test.txt";
+        let bytes = b"hello world";
+        let hash = hash_bytes(bytes);
+        let tx = arc_db.begin_write().unwrap();
+        tenanta
+            .put_tx(&tx, path, bytes.len() as u64, &hash)
+            .unwrap();
+        tx.commit().unwrap();
+
+        tenanta.delete(path).unwrap();
+
+        assert!(tenanta.get(path).unwrap().unwrap().is_deleted);
+        let tx = arc_db.begin_read().unwrap();
+        let table = tx.open_multimap_table(INDEX_FILES_BY_TENANT_HASH).unwrap();
+        let index_key = make_index_key(&tenanta_name, &hash);
+        let mut value_map = table.get(index_key.as_str()).unwrap();
+        assert_eq!(value_map.len(), 1);
+        let value = value_map.next().unwrap().unwrap();
+        let value = std::str::from_utf8(value.value()).unwrap();
+        let (dec_tenant_id, dec_path) = decode_key(value).unwrap();
+        assert_eq!(dec_tenant_id, tenanta_name);
+        assert_eq!(dec_path, path);
     }
 }
