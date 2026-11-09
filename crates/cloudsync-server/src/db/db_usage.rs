@@ -84,19 +84,24 @@ impl TenantUsageDb {
             let table = tx.open_table(TABLE_USAGES)?;
             let entry = table.get(tenant_id)?;
             let Some(entry) = entry else {
-                return Err(anyhow::anyhow!("not found"));
+                tracing::error!(
+                    tenant_id,
+                    decrement_bytes = usage,
+                    "usage record missing during deletion accounting"
+                );
+                anyhow::bail!("tenant usage record missing");
             };
             let bytes = entry.value();
             serde_json::from_slice::<UsageRecord>(bytes)?
         };
         user_record.usage = user_record.usage.checked_sub(usage).ok_or_else(|| {
             tracing::error!(
-                "usage underflow: tenant {} has usage {}, cannot decrement by {}",
                 tenant_id,
-                user_record.usage,
-                usage
+                current_usage_bytes = user_record.usage,
+                decrement_bytes = usage,
+                "usage accounting underflow"
             );
-            anyhow::anyhow!("usage account underflow")
+            anyhow::anyhow!("usage accounting underflow")
         })?;
         {
             let mut table = tx.open_table(TABLE_USAGES)?;

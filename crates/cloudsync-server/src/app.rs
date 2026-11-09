@@ -65,11 +65,8 @@ pub struct AppState {
 
 struct AppError(anyhow::Error, StatusCode);
 
-impl AppError {}
-
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
-        tracing::error!("{}", self.0);
         (self.1, self.0.to_string()).into_response()
     }
 }
@@ -96,8 +93,8 @@ impl From<service::ServiceError> for AppError {
                 anyhow::anyhow!("uploaded content does not match the declared hash".to_string()),
                 StatusCode::BAD_REQUEST,
             ),
-            service::ServiceError::Storage(_err) => AppError(
-                anyhow::anyhow!("internal error"),
+            service::ServiceError::Storage(err) => AppError(
+                anyhow::anyhow!(err).context("internal error"),
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
         }
@@ -106,7 +103,9 @@ impl From<service::ServiceError> for AppError {
 
 impl<E: Into<anyhow::Error>> From<E> for AppError {
     fn from(value: E) -> Self {
-        AppError(value.into(), StatusCode::INTERNAL_SERVER_ERROR)
+        let error = AppError(value.into(), StatusCode::INTERNAL_SERVER_ERROR);
+        tracing::error!(status = error.1.as_u16(), error = ?error.0, "request failed");
+        error
     }
 }
 
@@ -137,12 +136,21 @@ async fn list_files(
     tracing::debug!(tenant_id = %ctx.tenant_id, user_id = %ctx.user_id, "list_files");
     let files = service::TenantFileService::new(
         state.db,
-        ctx,
+        ctx.clone(),
         state.storage_dir,
         state.staging_dir,
         state.default_user_quota_bytes,
     )
-    .list_files()?;
+    .list_files()
+    .inspect_err(|err| match err {
+        service::ServiceError::Internal(_) | service::ServiceError::Storage(_) => {
+            tracing::error!(tenant_id = %ctx.tenant_id, operation = "list_files", error = ?err, "request failed");
+        }
+        _ => {
+            // Validation errors may contain private filenames.
+            tracing::debug!(tenant_id = %ctx.tenant_id, operation = "list_files", "request rejected");
+        }
+    })?;
     Ok(Json(ListFilesResponse { files }))
 }
 
@@ -173,13 +181,15 @@ async fn post_file(
     )
     .create_file(&path, &content)
     .inspect_err(|err| match err {
-        service::ServiceError::QuotaExceeded
-        | service::ServiceError::HashMismatch(_)
-        | service::ServiceError::Validation(_) => {
-            tracing::info!(tenant_id = &ctx.tenant_id, "failed to upload file: {}", err)
+        service::ServiceError::Internal(_) | service::ServiceError::Storage(_) => {
+            tracing::error!(tenant_id = %ctx.tenant_id, operation = "create_file", blob_hash = %cloudsync_common::hash_bytes(&content), error = ?err, "request failed");
+        }
+        service::ServiceError::Conflict(_) => {
+            tracing::info!(tenant_id = %ctx.tenant_id, operation = "create_file", blob_hash = %cloudsync_common::hash_bytes(&content), "upload temporarily conflicts with pending blob cleanup");
         }
         _ => {
-            tracing::error!(tenant_id = &ctx.tenant_id, "failed to upload file: {}", err)
+            // Validation errors may contain private filenames.
+            tracing::debug!(tenant_id = %ctx.tenant_id, operation = "create_file", blob_hash = %cloudsync_common::hash_bytes(&content), "request rejected");
         }
     })?;
 
@@ -195,12 +205,21 @@ async fn delete_file(
 ) -> Result<Response, AppError> {
     service::TenantFileService::new(
         state.db,
-        ctx,
+        ctx.clone(),
         state.storage_dir,
         state.staging_dir,
         state.default_user_quota_bytes,
     )
-    .delete_file(&path)?;
+    .delete_file(&path)
+    .inspect_err(|err| match err {
+        service::ServiceError::Internal(_) | service::ServiceError::Storage(_) => {
+            tracing::error!(tenant_id = %ctx.tenant_id, operation = "delete_file", error = ?err, "request failed");
+        }
+        _ => {
+            // Validation errors may contain private filenames.
+            tracing::debug!(tenant_id = %ctx.tenant_id, operation = "delete_file", "request rejected");
+        }
+    })?;
     // HTMX swaps `outerHTML` of the row; an empty 200 makes the row disappear.
     // Non-HTMX (CLI / API) callers keep getting the structured JSON response.
     if headers.get("HX-Request").is_some() {
@@ -219,17 +238,22 @@ async fn get_file(
     let tenant_id = ctx.tenant_id.clone();
     let file_meta = service::TenantFileService::new(
         state.db,
-        ctx,
+        ctx.clone(),
         state.storage_dir.clone(),
         state.staging_dir,
         state.default_user_quota_bytes,
     )
-    .get_file(&path)?;
-    tracing::debug!(
-        "metadata retrieved: {} (version: {})",
-        path,
-        file_meta.version
-    );
+    .get_file(&path)
+    .inspect_err(|err| match err {
+        service::ServiceError::Internal(_) | service::ServiceError::Storage(_) => {
+            tracing::error!(tenant_id = %ctx.tenant_id, operation = "get_file", error = ?err, "request failed");
+        }
+        _ => {
+            // Validation errors may contain private filenames.
+            tracing::debug!(tenant_id = %ctx.tenant_id, operation = "get_file", "request rejected");
+        }
+    })?;
+    tracing::debug!(version = file_meta.version, "file metadata retrieved");
     let content_hash = file_meta.content_hash;
     let path = storage::get_storage_path(&state.storage_dir, tenant_id.as_str(), &content_hash);
     let resp = ServeFile::new(path).oneshot(request).await?;
@@ -241,15 +265,28 @@ async fn create_upload(
     ctx: UserContext,
     extract::Json(body): extract::Json<InitUploadRequest>,
 ) -> Result<Json<InitUploadResponse>, AppError> {
+    let blob_hash = body.total_hash.clone();
     validate_upload_request_body(&body, state.max_upload_file_size)?;
     let upload_id = service::TenantFileService::new(
         state.db,
-        ctx,
+        ctx.clone(),
         state.storage_dir,
         state.staging_dir,
         state.default_user_quota_bytes,
     )
-    .create_upload(body)?;
+    .create_upload(body)
+    .inspect_err(|err| match err {
+        service::ServiceError::Internal(_) | service::ServiceError::Storage(_) => {
+            tracing::error!(tenant_id = %ctx.tenant_id, operation = "create_upload", blob_hash = %blob_hash, error = ?err, "request failed");
+        }
+        service::ServiceError::Conflict(_) => {
+            tracing::info!(tenant_id = %ctx.tenant_id, operation = "create_upload", blob_hash = %blob_hash, "upload temporarily conflicts with pending blob cleanup");
+        }
+        _ => {
+            // Validation errors may contain private filenames.
+            tracing::debug!(tenant_id = %ctx.tenant_id, operation = "create_upload", blob_hash = %blob_hash, "request rejected");
+        }
+    })?;
     Ok(Json(InitUploadResponse { upload_id }))
 }
 
@@ -308,12 +345,21 @@ async fn replace_chunk(
 ) -> Result<Json<ReplaceChunkResponse>, AppError> {
     service::TenantFileService::new(
         state.db,
-        ctx,
+        ctx.clone(),
         state.storage_dir,
         state.staging_dir,
         state.default_user_quota_bytes,
     )
-    .replace_chunk(&upload_id, index, body.as_ref())?;
+    .replace_chunk(&upload_id, index, body.as_ref())
+    .inspect_err(|err| match err {
+        service::ServiceError::Internal(_) | service::ServiceError::Storage(_) => {
+            tracing::error!(tenant_id = %ctx.tenant_id, operation = "replace_chunk", upload_id = %upload_id, error = ?err, "request failed");
+        }
+        _ => {
+            // Validation errors may contain private filenames.
+            tracing::debug!(tenant_id = %ctx.tenant_id, operation = "replace_chunk", upload_id = %upload_id, "request rejected");
+        }
+    })?;
     Ok(Json(ReplaceChunkResponse { chunk_index: index }))
 }
 
@@ -346,13 +392,13 @@ async fn finalize_upload(
         state.default_user_quota_bytes,
     )
     .finalize_upload(&upload_id)
-    .inspect_err(|err| {
-        if matches!(&err, service::ServiceError::HashMismatch(..)) {
-            tracing::info!(
-                upload_id,
-                tenant_id = ctx.tenant_id,
-                "upload rejected: content hash mismatch"
-            )
+    .inspect_err(|err| match err {
+        service::ServiceError::Internal(_) | service::ServiceError::Storage(_) => {
+            tracing::error!(tenant_id = %ctx.tenant_id, operation = "finalize_upload", upload_id = %upload_id, error = ?err, "request failed");
+        }
+        _ => {
+            // Validation errors may contain private filenames.
+            tracing::debug!(tenant_id = %ctx.tenant_id, operation = "finalize_upload", upload_id = %upload_id, "request rejected");
         }
     })?;
     Ok(Json(FinalizeUploadResponse { file }))
@@ -565,7 +611,7 @@ pub fn bootstrap_state(config: ServerConfig) -> anyhow::Result<AppState> {
 }
 
 fn create_db(config: &ServerConfig) -> anyhow::Result<Arc<Database>> {
-    let db = db_file::open_db(&config.dbname).context("faild to open database")?;
+    let db = db_file::open_db(&config.dbname).context("failed to open database")?;
     let db = Arc::new(db);
     migrations::run_migrations(&db, &config.default_tenant_id, &config.default_user_id)
         .context("failed to migrate database")?;
@@ -602,42 +648,71 @@ fn create_state(db: Arc<Database>, config: ServerConfig) -> AppState {
     }
 }
 
+fn log_gc_result(result: anyhow::Result<crate::service_gc::GcReport>, elapsed: Duration) {
+    match result {
+        Err(err) => {
+            // Operation-level logs retain local fields; this event reports the run outcome.
+            tracing::error!(error = ?err, elapsed_ms = elapsed.as_millis() as u64,
+                "garbage collection run failed");
+        }
+        Ok(report) => {
+            if report.has_work() {
+                tracing::info!(
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    newly_marked_blobs = report.newly_marked_blobs,
+                    deleted_blobs = report.deleted_blobs,
+                    already_absent_blobs = report.already_absent_blobs,
+                    released_bytes = report.released_bytes,
+                    "garbage collection completed"
+                );
+            } else {
+                tracing::debug!(
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "garbage collection completed without work"
+                );
+            }
+        }
+    }
+}
+
 pub async fn run_garbage_collector(
     interval: Duration,
     db: Arc<Database>,
     storage_dir: std::path::PathBuf,
     shutdown: tokio_util::sync::CancellationToken,
     garbage_collect_deleted_blobs: Arc<
-        impl Fn(&std::path::Path, Arc<Database>) -> anyhow::Result<Vec<String>> + Send + Sync + 'static,
+        impl Fn(&std::path::Path, Arc<Database>) -> anyhow::Result<crate::service_gc::GcReport>
+        + Send
+        + Sync
+        + 'static,
     >,
 ) {
+    tracing::info!(
+        interval_ms = interval.as_millis() as u64,
+        "garbage collector started"
+    );
     loop {
         let storage_dir = storage_dir.clone();
         let db = db.clone();
         let gc_shutdown = shutdown.clone();
         let cloned_garbage_collect_deleted_blobs = garbage_collect_deleted_blobs.clone();
+        let started = Instant::now();
         let join_res: Result<(), tokio::task::JoinError> = tokio::task::spawn_blocking(move || {
             if gc_shutdown.is_cancelled() {
                 return;
             }
-            let started = Instant::now();
+            tracing::debug!("garbage collection run started");
             let result = cloned_garbage_collect_deleted_blobs(&storage_dir, db);
-            match result {
-                Err(err) => {
-                    tracing::error!(error = ?err, "failed to run blob garbage collection");
-                }
-                Ok(deleted) => {
-                    tracing::info!(
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        deleted_blobs = deleted.len(),
-                        "garbage collection completed"
-                    )
-                }
-            }
+            log_gc_result(result, started.elapsed());
         })
         .await;
         if let Err(err) = join_res {
-            tracing::error!(error = ?err, "failed to finish blob garbage collection");
+            tracing::error!(
+                panicked = err.is_panic(),
+                cancelled = err.is_cancelled(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "garbage collection task failed"
+            );
         }
         tracing::debug!(
             interval = ?interval,
@@ -850,8 +925,7 @@ mod tests {
         let token = tokio_util::sync::CancellationToken::new();
         token.cancel();
         let callback = move |_data_dir: &std::path::Path, _db: Arc<redb::Database>| {
-            let vec = vec![];
-            Ok(vec)
+            Ok(crate::service_gc::GcReport::default())
         };
         run_garbage_collector(
             interval,
@@ -876,8 +950,7 @@ mod tests {
         let callback = move |_data_dir: &std::path::Path, _db: Arc<redb::Database>| {
             tx.blocking_send(()).unwrap();
             release_rx.lock().unwrap().recv().unwrap();
-            let vec = vec![];
-            Ok(vec)
+            Ok(crate::service_gc::GcReport::default())
         };
 
         let mut handle = tokio::spawn(run_garbage_collector(
@@ -919,8 +992,7 @@ mod tests {
             let res = rx.lock().unwrap().recv()?;
             cb_tx.blocking_send(()).unwrap();
             res?;
-            let vec = vec![];
-            Ok(vec)
+            Ok(crate::service_gc::GcReport::default())
         };
 
         let handle = tokio::spawn(run_garbage_collector(
@@ -963,7 +1035,7 @@ mod tests {
             // Signal before taking the mutex, so it cannot conceal overlapping runs.
             started_tx.send(())?;
             release_rx.lock().unwrap().recv()?;
-            Ok(vec![])
+            Ok(crate::service_gc::GcReport::default())
         };
 
         let handle = tokio::spawn(run_garbage_collector(
