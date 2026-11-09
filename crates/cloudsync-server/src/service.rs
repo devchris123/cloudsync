@@ -119,7 +119,7 @@ impl TenantFileService {
     /// Stored bytes remain charged against the tenant's quota.
     pub fn delete_file(&self, path: &str) -> Result<(), ServiceError> {
         db_file::TenantFileMetaDb::new(self.db.clone(), self.ctx.clone()).delete(path)?;
-        tracing::info!("file marked as deleted: {}", path);
+        tracing::debug!(tenant_id = self.ctx.tenant_id, "file metadata soft-deleted");
         Ok(())
     }
 
@@ -155,10 +155,15 @@ impl TenantFileService {
             content_hash = storage::write(&self.storage_dir, &self.ctx.tenant_id, content)?;
         }
 
-        tracing::info!("file stored: {} (hash: {})", path, content_hash);
         let file_meta = db_file.put_tx(&tx, path, content_size, &content_hash)?;
-        tracing::info!("metadata saved: {} (version: {})", path, file_meta.version);
         tx.commit()?;
+        tracing::debug!(
+            tenant_id = self.ctx.tenant_id,
+            blob_hash = content_hash,
+            version = file_meta.version,
+            size_bytes = content_size,
+            "file upload committed"
+        );
 
         Ok(file_meta)
     }
@@ -195,6 +200,13 @@ impl TenantFileService {
         tx.commit()?;
         let upload_staging_dir = self.staging_dir.join(&upload.upload_id);
         std::fs::create_dir_all(upload_staging_dir)?;
+        tracing::debug!(
+            tenant_id = self.ctx.tenant_id,
+            upload_id = upload.upload_id,
+            blob_hash = upload.total_hash,
+            size_bytes = upload.total_size,
+            "upload session created"
+        );
         Ok(upload.upload_id)
     }
 
@@ -204,7 +216,10 @@ impl TenantFileService {
         let usage = match usage {
             Some(usage) => usage.usage,
             None => {
-                tracing::info!("initialize storage quota for tenant {}", self.ctx.tenant_id);
+                tracing::trace!(
+                    tenant_id = self.ctx.tenant_id,
+                    "initializing usage record in transaction"
+                );
                 usage_db.put_tx(tx, 0)?.usage
             }
         };
@@ -243,7 +258,14 @@ impl TenantFileService {
             .and_then(|sum| sum.checked_add(upload_usage))
             .ok_or(ServiceError::QuotaExceeded)?;
         if self.default_user_quota_bytes < total {
-            tracing::info!("storage quota exceeded for tenant {}", self.ctx.tenant_id);
+            tracing::debug!(
+                tenant_id = self.ctx.tenant_id,
+                requested_bytes = content_size,
+                current_usage_bytes = usage,
+                reserved_bytes = upload_usage,
+                quota_bytes = self.default_user_quota_bytes,
+                "upload exceeds storage quota"
+            );
             return Err(ServiceError::QuotaExceeded);
         }
 
@@ -353,8 +375,16 @@ impl TenantFileService {
         upload_db.delete_tx(&tx, upload_id)?;
         tx.commit()?;
         if let Err(err) = std::fs::remove_dir_all(upload_staging_dir) {
-            tracing::warn!(upload_id, error= %err, "upload finalized but staging cleanup failed");
+            tracing::warn!(tenant_id = self.ctx.tenant_id, upload_id, error = ?err,
+                "upload finalized but staging cleanup failed");
         }
+        tracing::debug!(
+            tenant_id = self.ctx.tenant_id,
+            upload_id,
+            blob_hash = upload.total_hash,
+            version = file.version,
+            "chunked upload committed"
+        );
         Ok(file)
     }
 }

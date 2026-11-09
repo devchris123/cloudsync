@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(async move {
             tokio::select! {
                 result = tokio::signal::ctrl_c() => {
-                    if let Err(err) = result {
+                    if let Err(err) = &result {
                         tracing::error!(error = ?err, "signal listener failed");
                     } else {
                         tracing::info!("received Ctrl+C, shutting down server");
@@ -68,11 +68,20 @@ async fn main() -> anyhow::Result<()> {
 
     gc_cancel_token.cancel();
     let result = gc_handle.await;
-    if let Err(err) = result {
-        tracing::error!(error = ?err, "failed to finish garbage collection task");
+    if let Err(err) = &result {
+        tracing::error!(
+            panicked = err.is_panic(),
+            cancelled = err.is_cancelled(),
+            "failed to finish garbage collection task"
+        );
     } else {
-        tracing::debug!("succesfully shut down GC");
+        tracing::debug!("garbage collector stopped");
     }
+    tracing::info!(
+        server_ok = serve_result.is_ok(),
+        gc_ok = result.is_ok(),
+        "server shutdown completed"
+    );
     Ok(serve_result?)
 }
 

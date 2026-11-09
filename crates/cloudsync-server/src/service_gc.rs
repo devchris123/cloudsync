@@ -1,6 +1,6 @@
 use std::{collections::HashSet, path::Path, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use redb::{AccessGuard, Database, MultimapValue, ReadableMultimapTable, WriteTransaction};
 
 use crate::{
@@ -15,34 +15,68 @@ use crate::{
     storage,
 };
 
-pub fn garbage_collect_deleted_blobs(data_dir: &Path, db: Arc<Database>) -> Result<Vec<String>> {
+/// Committed outcomes; recovered deletions are separate from filesystem removals.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct GcReport {
+    pub newly_marked_blobs: usize,
+    pub deleted_blobs: usize,
+    pub already_absent_blobs: usize,
+    pub released_bytes: u64,
+}
+
+impl GcReport {
+    pub fn has_work(&self) -> bool {
+        self.newly_marked_blobs != 0 || self.deleted_blobs != 0 || self.already_absent_blobs != 0
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.newly_marked_blobs += other.newly_marked_blobs;
+        self.deleted_blobs += other.deleted_blobs;
+        self.already_absent_blobs += other.already_absent_blobs;
+        self.released_bytes += other.released_bytes;
+    }
+}
+
+pub fn garbage_collect_deleted_blobs(data_dir: &Path, db: Arc<Database>) -> Result<GcReport> {
     let tenant_db = TenantDb::new();
     let tenants = {
-        let tx = db.begin_read()?;
-        tenant_db.list(&tx)?
+        let tx = db
+            .begin_read()
+            .context("opening tenant discovery transaction")?;
+        tenant_db.list(&tx).context("listing tenants for GC")?
     };
-
-    let mut file_metas_marked: Vec<String> = vec![];
+    let mut report = GcReport::default();
     for tenant in tenants {
-        let marked = mark_and_delete_blobs_for_tenant(data_dir, db.clone(), &tenant.tenant_id)?;
-        file_metas_marked.extend(marked);
+        report.merge(mark_and_delete_blobs_for_tenant(
+            data_dir,
+            db.clone(),
+            &tenant.tenant_id,
+        )?);
     }
-    Ok(file_metas_marked)
+    Ok(report)
 }
 
 fn mark_and_delete_blobs_for_tenant(
     data_dir: &Path,
     db: Arc<Database>,
     tenant_id: &str,
-) -> Result<Vec<String>> {
-    let marked =
-        mark_blobs_for_garbage_collection(data_dir, db.clone(), tenant_id).inspect_err(|err| {
-            tracing::error!(tenant_id = tenant_id, error = ?err, "failed to mark blobs for deletion");
-        })?;
-    delete_marked_blobs(data_dir, db.clone(), tenant_id).inspect_err(|err| {
-        tracing::error!(tenant_id = tenant_id, error = ?err, "failed to delete marked blobs");
-    })?;
-    Ok(marked)
+) -> Result<GcReport> {
+    let started = std::time::Instant::now();
+    let marked = mark_blobs_for_garbage_collection(data_dir, db.clone(), tenant_id)
+        .with_context(|| format!("marking blobs for tenant {tenant_id}"))?;
+    let mut report = delete_marked_blobs(data_dir, db.clone(), tenant_id)
+        .with_context(|| format!("deleting pending blobs for tenant {tenant_id}"))?;
+    report.newly_marked_blobs = marked.len();
+    tracing::debug!(
+        tenant_id,
+        newly_marked_blobs = report.newly_marked_blobs,
+        deleted_blobs = report.deleted_blobs,
+        already_absent_blobs = report.already_absent_blobs,
+        released_bytes = report.released_bytes,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "tenant garbage collection completed"
+    );
+    Ok(report)
 }
 
 pub(crate) fn mark_blobs_for_garbage_collection(
@@ -76,7 +110,7 @@ pub(crate) fn mark_blobs_for_garbage_collection(
         let start = format!("{}\0", tenant_id);
         let end = format!("{}\u{1}", tenant_id);
         for index_entry in table.range(start.as_str()..end.as_str())? {
-            let index_entry = index_entry?;
+            let index_entry = index_entry.context("reading blob reference index")?;
             let (hash, marked) = mark_blob_for_garbage_collection(
                 &tx,
                 &file_db,
@@ -106,47 +140,71 @@ fn mark_blob_for_garbage_collection(
         .split_once('\0')
         .ok_or_else(|| anyhow::anyhow!("invalid blob index key"))?;
 
-    if active_upload_hashes.contains(hash) {
-        return Ok((hash.to_owned(), false));
-    }
-    let mut is_referenced = false;
-    for file_key in file_keys {
-        let file_key_guard = file_key?;
-        is_referenced = is_blob_referenced(tx, file_db, file_key_guard)?;
-        if is_referenced {
-            break;
-        }
-    }
-    if is_referenced {
-        return Ok((hash.to_owned(), false));
-    }
-    let pending_deletion_db = PendingBlobDeletionDb::new(UserContext {
-        tenant_id: tenant_id.to_string(),
-        user_id: tenant_id.to_string(),
-    });
-    if pending_deletion_db.exists_tx(tx, hash)? {
-        return Ok((hash.to_owned(), true));
-    }
-    let metadata = std::fs::metadata(storage::get_storage_path(data_dir, tenant_id, hash));
-    let metadata = match metadata {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+    (|| -> Result<(String, bool)> {
+        if active_upload_hashes.contains(hash) {
+            tracing::trace!(
+                tenant_id,
+                blob_hash = hash,
+                reason = "active_upload",
+                "blob protected from GC"
+            );
             return Ok((hash.to_owned(), false));
         }
-        Err(err) => return Err(err.into()),
-    };
-    if !metadata.is_file() {
-        return Err(anyhow::anyhow!("unexpected directory"));
-    }
-    pending_deletion_db.put_tx(
-        tx,
-        hash,
-        PendingBlobDeletionRecord {
-            size_bytes: metadata.len(),
-            marked_at: chrono::Utc::now(),
-        },
-    )?;
-    Ok((hash.to_owned(), true))
+        let mut is_referenced = false;
+        for file_key in file_keys {
+            let file_key_guard = file_key?;
+            is_referenced = is_blob_referenced(tx, file_db, file_key_guard)
+                .context("checking blob references")?;
+            if is_referenced {
+                break;
+            }
+        }
+        if is_referenced {
+            tracing::trace!(
+                tenant_id,
+                blob_hash = hash,
+                reason = "live_reference",
+                "blob protected from GC"
+            );
+            return Ok((hash.to_owned(), false));
+        }
+        let pending_deletion_db = PendingBlobDeletionDb::new(UserContext {
+            tenant_id: tenant_id.to_string(),
+            user_id: tenant_id.to_string(),
+        });
+        if pending_deletion_db.exists_tx(tx, hash)? {
+            tracing::trace!(tenant_id, blob_hash = hash, "blob already pending deletion");
+            return Ok((hash.to_owned(), false));
+        }
+        let metadata = std::fs::metadata(storage::get_storage_path(data_dir, tenant_id, hash));
+        let metadata = match metadata {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                tracing::trace!(tenant_id, blob_hash = hash, "unmarked blob already absent");
+                return Ok((hash.to_owned(), false));
+            }
+            Err(err) => return Err(anyhow::Error::from(err).context("reading blob metadata")),
+        };
+        if !metadata.is_file() {
+            return Err(anyhow::anyhow!("blob storage entry is not a regular file")
+                .context("checking blob type"));
+        }
+        pending_deletion_db
+            .put_tx(
+                tx,
+                hash,
+                PendingBlobDeletionRecord {
+                    size_bytes: metadata.len(),
+                    marked_at: chrono::Utc::now(),
+                },
+            )
+            .context("persisting blob deletion intent")?;
+        Ok((hash.to_owned(), true))
+    })()
+    .inspect_err(|err| {
+        tracing::error!(tenant_id, blob_hash = hash, phase = "marking", error = ?err,
+            "failed to mark blob for deletion");
+    })
 }
 
 fn is_blob_referenced(
@@ -156,46 +214,79 @@ fn is_blob_referenced(
 ) -> anyhow::Result<bool> {
     let bytes = file_key_guard.value();
     let tenant_path = std::str::from_utf8(bytes)?;
-    let (tenant_id, path) = tenant_path
+    let (_tenant_id, path) = tenant_path
         .split_once('\0')
         .ok_or_else(|| anyhow::anyhow!("invalid file_meta key"))?;
     let file_meta = file_db.get_tx(tx, path)?;
     match file_meta {
         Some(file_meta) => Ok(!file_meta.is_deleted),
-        None => {
-            tracing::warn!(
-                tenant_id = tenant_id,
-                file_path = path,
-                "inconsistent file index. Missing metadata"
-            );
-            Err(anyhow::anyhow!("inconsistent file index. Missing metadata"))
-        }
+        None => Err(anyhow::anyhow!(
+            "blob reference index points to missing file metadata"
+        )),
     }
 }
 
-fn delete_marked_blobs(data_dir: &Path, db: Arc<Database>, tenant_id: &str) -> anyhow::Result<()> {
+fn delete_marked_blobs(data_dir: &Path, db: Arc<Database>, tenant_id: &str) -> Result<GcReport> {
     let ctx = UserContext {
         tenant_id: tenant_id.to_string(),
         user_id: tenant_id.to_string(),
     };
     let pending_deletion_db = PendingBlobDeletionDb::new(ctx.clone());
     let usage_db = TenantUsageDb::new(db.clone(), ctx);
-
-    let pending_deletions = {
+    let pending_deletions = (|| -> Result<_> {
         let tx = db.begin_write()?;
         let pending = pending_deletion_db.list(&tx)?;
         tx.commit()?;
-        pending
-    };
-    for (hash, pending_deletion) in pending_deletions {
-        let tx = db.begin_write()?;
-        storage::remove_if_exists(data_dir, tenant_id, hash.as_str())?;
-        pending_deletion_db.delete_tx(&tx, hash.as_str())?;
-        usage_db.decrement_tx(&tx, pending_deletion.size_bytes)?;
-        tx.commit()?;
+        Ok(pending)
+    })()
+    .with_context(|| format!("listing pending deletions for tenant {tenant_id}"))?;
+    if !pending_deletions.is_empty() {
+        tracing::debug!(
+            tenant_id,
+            pending_blobs = pending_deletions.len(),
+            "processing pending blob deletions"
+        );
     }
-
-    Ok(())
+    let mut report = GcReport::default();
+    for (hash, pending_deletion) in pending_deletions {
+        let removed = (|| -> Result<bool> {
+            let tx = db
+                .begin_write()
+                .context("opening blob deletion transaction")?;
+            let removed = storage::remove_if_exists(data_dir, tenant_id, hash.as_str())
+                .context("removing pending blob from storage")?;
+            pending_deletion_db
+                .delete_tx(&tx, hash.as_str())
+                .context("removing pending intent")?;
+            usage_db
+                .decrement_tx(&tx, pending_deletion.size_bytes)
+                .context("releasing blob usage charge")?;
+            tx.commit().context("committing blob deletion accounting")?;
+            Ok(removed)
+        })()
+        .inspect_err(|err| {
+            tracing::error!(tenant_id, blob_hash = hash, phase = "deletion", error = ?err,
+                committed_deleted_blobs = report.deleted_blobs,
+                committed_already_absent_blobs = report.already_absent_blobs,
+                committed_released_bytes = report.released_bytes,
+                "failed to complete pending blob deletion");
+        })?;
+        // Only report completed outcomes after the accounting commit succeeds.
+        if removed {
+            report.deleted_blobs += 1;
+        } else {
+            report.already_absent_blobs += 1;
+        }
+        report.released_bytes += pending_deletion.size_bytes;
+        tracing::debug!(
+            tenant_id,
+            blob_hash = hash,
+            removed,
+            released_bytes = pending_deletion.size_bytes,
+            "blob deletion accounting committed"
+        );
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -316,8 +407,8 @@ mod test {
         let file_metas_delete_2 =
             mark_and_delete_blobs_for_tenant(storage_dir.path(), db.clone(), "tenant1").unwrap();
 
-        assert_eq!(file_metas_delete.len(), 2);
-        assert_eq!(file_metas_delete_2.len(), 0);
+        assert_eq!(file_metas_delete.newly_marked_blobs, 2);
+        assert_eq!(file_metas_delete_2.newly_marked_blobs, 0);
 
         let expected_files = vec![
             storage::get_storage_path(storage_dir.path(), "tenant1", &fm3.content_hash),
@@ -368,7 +459,7 @@ mod test {
         let file_metas_delete =
             mark_and_delete_blobs_for_tenant(storage_dir.path(), db.clone(), "tenant1").unwrap();
 
-        assert_eq!(file_metas_delete.len(), 0);
+        assert_eq!(file_metas_delete.newly_marked_blobs, 0);
     }
 
     #[test]
@@ -392,7 +483,7 @@ mod test {
         let file_metas_delete =
             mark_and_delete_blobs_for_tenant(storage_dir.path(), db.clone(), "tenant1").unwrap();
 
-        assert_eq!(file_metas_delete.len(), 1);
+        assert_eq!(file_metas_delete.newly_marked_blobs, 1);
         let expected_file =
             storage::get_storage_path(storage_dir.path(), "tenant2", &fm2.content_hash);
         assert!(expected_file.exists());
@@ -437,7 +528,7 @@ mod test {
         let file_metas_delete =
             mark_and_delete_blobs_for_tenant(storage_dir.path(), db.clone(), "tenant1").unwrap();
 
-        assert_eq!(file_metas_delete.len(), 1);
+        assert_eq!(file_metas_delete.newly_marked_blobs, 1);
         let expected_file =
             storage::get_storage_path(storage_dir.path(), "tenant2", &fm2.content_hash);
         assert!(expected_file.exists());
@@ -619,6 +710,52 @@ mod test {
         assert!(path.is_file());
         assert_eq!(cleanup_state(&db).0, content.len() as u64);
         assert!(service.get_file("old").unwrap().is_deleted);
+    }
+
+    #[test]
+    fn gc_report_counts_new_marks_removals_and_recovered_accounting_separately() {
+        let (dir, db) = test_db();
+        let db = Arc::new(db);
+        let service = create_tenant("tenant1", db.clone(), dir.path().to_path_buf());
+        service.create_file("first", b"abc").unwrap();
+        service.create_file("shared", b"abc").unwrap();
+        service.delete_file("first").unwrap();
+        service.delete_file("shared").unwrap();
+
+        let report = garbage_collect_deleted_blobs(dir.path(), db.clone()).unwrap();
+        assert_eq!(
+            report,
+            GcReport {
+                newly_marked_blobs: 1,
+                deleted_blobs: 1,
+                already_absent_blobs: 0,
+                released_bytes: 3,
+            }
+        );
+
+        let meta = service.create_file("recovered", b"recover").unwrap();
+        service.delete_file("recovered").unwrap();
+        mark_blobs_for_garbage_collection(dir.path(), db.clone(), "tenant1").unwrap();
+        std::fs::remove_file(storage::get_storage_path(
+            dir.path(),
+            "tenant1",
+            &meta.content_hash,
+        ))
+        .unwrap();
+        let report = garbage_collect_deleted_blobs(dir.path(), db.clone()).unwrap();
+        assert_eq!(
+            report,
+            GcReport {
+                newly_marked_blobs: 0,
+                deleted_blobs: 0,
+                already_absent_blobs: 1,
+                released_bytes: 7,
+            }
+        );
+        assert_eq!(
+            garbage_collect_deleted_blobs(dir.path(), db).unwrap(),
+            GcReport::default()
+        );
     }
 
     #[test]
