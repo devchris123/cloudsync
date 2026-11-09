@@ -319,6 +319,17 @@ mod test {
         (dir, db)
     }
 
+    #[test]
+    fn garbage_collect_new_database_without_tenants_is_noop() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.redb");
+        let db = crate::db::db_file::open_db(path.to_str().unwrap()).unwrap();
+
+        let report = garbage_collect_deleted_blobs(dir.path(), Arc::new(db)).unwrap();
+
+        assert_eq!(report, GcReport::default());
+    }
+
     fn create_tenant(
         tenant_id: &str,
         db: Arc<redb::Database>,

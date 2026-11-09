@@ -173,7 +173,7 @@ fn create_config(args: cli::Args) -> config::ServerConfig {
             _ => None,
         },
         max_upload_file_size: args.max_upload_file_size,
-        gc_interval: std::time::Duration::from_millis(args.gc_interval),
+        gc_interval: std::time::Duration::from_secs(args.gc_interval),
     }
 }
 
@@ -205,6 +205,7 @@ mod tests {
 
         let config = create_config(args);
 
+        assert_eq!(config.gc_interval, config::DEFAULT_GC_INTERVAL);
         assert_eq!(config.session_signing_secret, "test-session-signing-secret");
         assert!(config.oidc_config.is_some());
         let oidc_config = config.oidc_config.unwrap();
