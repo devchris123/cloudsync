@@ -3,7 +3,10 @@ use std::sync::Arc;
 use cloudsync_common::FileMeta;
 use redb::{Database, MultimapTableDefinition, ReadableTable, Table, TableDefinition};
 
-use crate::{auth::UserContext, db::db_upload::TABLE_UPLOADS};
+use crate::{
+    auth::UserContext,
+    db::{db_tenants::TABLE_TENANTS, db_upload::TABLE_UPLOADS},
+};
 
 pub const TABLE_FILES: TableDefinition<&str, &[u8]> = TableDefinition::new("files");
 pub const INDEX_FILES_BY_TENANT_HASH: MultimapTableDefinition<&str, &[u8]> =
@@ -15,6 +18,7 @@ pub fn open_db(db_path: &str) -> anyhow::Result<Database> {
     {
         tx.open_table(TABLE_FILES)?;
         tx.open_table(TABLE_UPLOADS)?;
+        tx.open_table(TABLE_TENANTS)?;
         tx.open_multimap_table(INDEX_FILES_BY_TENANT_HASH)?;
     }
     tx.commit()?;
