@@ -1,3 +1,4 @@
+use crate::db::tx::{Transaction, with_read_transaction};
 use anyhow::Context;
 use std::{
     sync::Arc,
@@ -30,7 +31,7 @@ use crate::{
     config::ServerConfig,
     db::{
         db_file::{self},
-        db_tenants::{TenantDb, TenantRecord},
+        db_tenants::{self, TenantRecord},
         db_upload,
     },
     migrations,
@@ -368,8 +369,9 @@ async fn get_upload(
     extract::Path(upload_id): Path<String>,
     ctx: UserContext,
 ) -> Result<Json<GetUploadResponse>, AppError> {
-    let db = db_upload::TenantUploadDb::new(state.db, ctx);
-    let upload = db.get(&upload_id)?;
+    let upload = with_read_transaction(&state.db, |tx| {
+        db_upload::get_tx(&Transaction::Read(tx), &ctx.tenant_id, &upload_id)
+    })?;
     let Some(upload) = upload else {
         return Err(AppError(
             anyhow::anyhow!("not found"),
@@ -562,32 +564,28 @@ async fn tenant_registry_layer(
 }
 
 fn admit_tenant(db: Arc<Database>, tenant_id: &str, max_tenant_count: u64) -> anyhow::Result<bool> {
-    let tenant_db = TenantDb::new();
     let tx = db
         .begin_write()
         .context("opening tenant admission transaction")?;
-    let exists = tenant_db
-        .exists(&tx, tenant_id)
+    let exists = db_tenants::exists_tx(&Transaction::Write(&tx), tenant_id)
         .context("checking tenant existence")?;
     if exists {
         tx.abort().context("abort tenant admission transaction")?;
         return Ok(true);
     }
-    let count = tenant_db
-        .count(&tx)
-        .context("call database for tenant count")?;
+    let count =
+        db_tenants::count_tx(&Transaction::Write(&tx)).context("call database for tenant count")?;
     if count >= max_tenant_count {
         tx.abort().context("abort tenant admission transaction")?;
         return Ok(false);
     }
-    tenant_db
-        .create(
-            &tx,
-            TenantRecord {
-                tenant_id: tenant_id.to_string(),
-            },
-        )
-        .context("create tenant record")?;
+    db_tenants::create_tx(
+        &tx,
+        TenantRecord {
+            tenant_id: tenant_id.to_string(),
+        },
+    )
+    .context("create tenant record")?;
     tx.commit()
         .context("committing tenant admission transaction")?;
     tracing::info!(

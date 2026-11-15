@@ -1,18 +1,9 @@
-use std::sync::Arc;
-
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-use crate::auth::UserContext;
 use crate::db::tx::Transaction;
 
 pub const TABLE_USAGES: TableDefinition<&str, &[u8]> = TableDefinition::new("usages");
-
-pub struct TenantUsageDb {
-    #[cfg(test)]
-    db: Arc<Database>,
-    user_context: UserContext,
-}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct UsageRecord {
@@ -20,118 +11,101 @@ pub struct UsageRecord {
     pub usage: u64,
 }
 
-impl TenantUsageDb {
-    pub fn new(_db: Arc<Database>, user_context: UserContext) -> Self {
-        TenantUsageDb {
-            #[cfg(test)]
-            db: _db,
-            user_context,
+pub fn get_tx(tx: &Transaction, tenant_id: &str) -> anyhow::Result<Option<UsageRecord>> {
+    match tx {
+        Transaction::Read(tx) => {
+            let table = tx.open_table(TABLE_USAGES)?;
+            get_from_table(&table, tenant_id)
+        }
+        Transaction::Write(tx) => {
+            let table = tx.open_table(TABLE_USAGES)?;
+            get_from_table(&table, tenant_id)
         }
     }
+}
 
-    pub fn get_tx(&self, tx: &Transaction) -> Result<Option<UsageRecord>, anyhow::Error> {
-        match tx {
-            #[cfg(test)]
-            Transaction::Read(tx) => {
-                let table = tx.open_table(TABLE_USAGES)?;
-                self.get_from_table(&table)
-            }
-            Transaction::Write(tx) => {
-                let table = tx.open_table(TABLE_USAGES)?;
-                self.get_from_table(&table)
-            }
-        }
+fn get_from_table(
+    table: &impl ReadableTable<&'static str, &'static [u8]>,
+    tenant_id: &str,
+) -> Result<Option<UsageRecord>, anyhow::Error> {
+    let entry = table.get(tenant_id)?;
+    let Some(entry) = entry else {
+        return Ok(None);
+    };
+    let bytes = entry.value();
+    let user_record = serde_json::from_slice::<UsageRecord>(bytes)?;
+    if user_record.tenant_id != tenant_id {
+        return Ok(None);
     }
+    Ok(Some(user_record))
+}
 
-    fn get_from_table(
-        &self,
-        table: &impl ReadableTable<&'static str, &'static [u8]>,
-    ) -> Result<Option<UsageRecord>, anyhow::Error> {
-        let tenant_id = self.user_context.tenant_id.as_str();
+pub fn put_tx(
+    tx: &redb::WriteTransaction,
+    tenant_id: &str,
+    usage: u64,
+) -> anyhow::Result<UsageRecord> {
+    let user_record = UsageRecord {
+        tenant_id: tenant_id.to_owned(),
+        usage,
+    };
+    {
+        let mut table = tx.open_table(TABLE_USAGES)?;
+        let bytes = serde_json::to_vec(&user_record)?;
+        table.insert(tenant_id, bytes.as_slice())?;
+    }
+    Ok(user_record)
+}
+
+pub fn decrement_tx(
+    tx: &redb::WriteTransaction,
+    tenant_id: &str,
+    usage: u64,
+) -> anyhow::Result<UsageRecord> {
+    let mut user_record = {
+        let table = tx.open_table(TABLE_USAGES)?;
         let entry = table.get(tenant_id)?;
         let Some(entry) = entry else {
-            return Ok(None);
-        };
-        let bytes = entry.value();
-        let user_record = serde_json::from_slice::<UsageRecord>(bytes)?;
-        if user_record.tenant_id != self.user_context.tenant_id {
-            return Ok(None);
-        }
-        Ok(Some(user_record))
-    }
-
-    pub fn put_tx(&self, tx: &redb::WriteTransaction, usage: u64) -> anyhow::Result<UsageRecord> {
-        let tenant_id = self.user_context.tenant_id.clone();
-        let user_record = UsageRecord {
-            tenant_id: tenant_id.clone(),
-            usage,
-        };
-        {
-            let mut table = tx.open_table(TABLE_USAGES)?;
-            let bytes = serde_json::to_vec(&user_record)?;
-            table.insert(tenant_id.as_str(), bytes.as_slice())?;
-        }
-        Ok(user_record)
-    }
-
-    pub fn decrement_tx(
-        &self,
-        tx: &redb::WriteTransaction,
-        usage: u64,
-    ) -> anyhow::Result<UsageRecord> {
-        let tenant_id = self.user_context.tenant_id.as_str();
-        let mut user_record = {
-            let table = tx.open_table(TABLE_USAGES)?;
-            let entry = table.get(tenant_id)?;
-            let Some(entry) = entry else {
-                tracing::error!(
-                    tenant_id,
-                    decrement_bytes = usage,
-                    "usage record missing during deletion accounting"
-                );
-                anyhow::bail!("tenant usage record missing");
-            };
-            let bytes = entry.value();
-            serde_json::from_slice::<UsageRecord>(bytes)?
-        };
-        user_record.usage = user_record.usage.checked_sub(usage).ok_or_else(|| {
             tracing::error!(
                 tenant_id,
-                current_usage_bytes = user_record.usage,
                 decrement_bytes = usage,
-                "usage accounting underflow"
+                "usage record missing during deletion accounting"
             );
-            anyhow::anyhow!("usage accounting underflow")
-        })?;
-        {
-            let mut table = tx.open_table(TABLE_USAGES)?;
-            let bytes = serde_json::to_vec(&user_record)?;
-            table.insert(tenant_id, bytes.as_slice())?;
-        }
-        Ok(user_record)
+            anyhow::bail!("tenant usage record missing");
+        };
+        let bytes = entry.value();
+        serde_json::from_slice::<UsageRecord>(bytes)?
+    };
+    user_record.usage = user_record.usage.checked_sub(usage).ok_or_else(|| {
+        tracing::error!(
+            tenant_id,
+            current_usage_bytes = user_record.usage,
+            decrement_bytes = usage,
+            "usage accounting underflow"
+        );
+        anyhow::anyhow!("usage accounting underflow")
+    })?;
+    {
+        let mut table = tx.open_table(TABLE_USAGES)?;
+        let bytes = serde_json::to_vec(&user_record)?;
+        table.insert(tenant_id, bytes.as_slice())?;
     }
+    Ok(user_record)
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+    use redb::Database;
 
     use tempfile::TempDir;
 
-    fn test_db(tenant_id: &str) -> (TempDir, TenantUsageDb) {
+    fn test_db(_tenant_id: &str) -> (TempDir, Database) {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("test.redb");
-        let db = redb::Database::create(&path).unwrap();
+        let db = Database::create(dir.path().join("test.redb")).unwrap();
         let tx = db.begin_write().unwrap();
         tx.open_table(TABLE_USAGES).unwrap();
         tx.commit().unwrap();
-        let db = TenantUsageDb {
-            db: Arc::new(db),
-            user_context: UserContext {
-                tenant_id: tenant_id.to_string(),
-                user_id: "user1".to_string(),
-            },
-        };
         (dir, db)
     }
 
@@ -139,8 +113,8 @@ mod test {
     fn test_get_not_exist() {
         let (_dir, db) = test_db("tenant1");
 
-        let tx = db.db.begin_write().unwrap();
-        let usage_rec = db.get_tx(&Transaction::Write(&tx)).unwrap();
+        let tx = db.begin_write().unwrap();
+        let usage_rec = get_tx(&Transaction::Write(&tx), "tenant1").unwrap();
         tx.commit().unwrap();
 
         assert!(usage_rec.is_none());
@@ -150,12 +124,14 @@ mod test {
     fn test_get() {
         let (_dir, db) = test_db("tenant1");
 
-        let tx = db.db.begin_write().unwrap();
-        db.put_tx(&tx, 100).unwrap();
+        let tx = db.begin_write().unwrap();
+        put_tx(&tx, "tenant1", 100).unwrap();
         tx.commit().unwrap();
 
-        let tx = db.db.begin_write().unwrap();
-        let usage_rec = db.get_tx(&Transaction::Write(&tx)).unwrap().unwrap();
+        let tx = db.begin_write().unwrap();
+        let usage_rec = get_tx(&Transaction::Write(&tx), "tenant1")
+            .unwrap()
+            .unwrap();
 
         assert_eq!("tenant1", usage_rec.tenant_id);
         assert_eq!(100, usage_rec.usage);
@@ -165,15 +141,17 @@ mod test {
     fn test_tx_isolate_reads() {
         let (_dir, db) = test_db("tenant1");
 
-        let tx1 = db.db.begin_write().unwrap();
-        db.put_tx(&tx1, 0).unwrap();
+        let tx1 = db.begin_write().unwrap();
+        put_tx(&tx1, "tenant1", 0).unwrap();
         tx1.commit().unwrap();
 
-        let tx1 = db.db.begin_write().unwrap();
-        db.put_tx(&tx1, 100).unwrap();
+        let tx1 = db.begin_write().unwrap();
+        put_tx(&tx1, "tenant1", 100).unwrap();
 
-        let tx2 = db.db.begin_read().unwrap();
-        let user_record = db.get_tx(&Transaction::Read(&tx2)).unwrap().unwrap();
+        let tx2 = db.begin_read().unwrap();
+        let user_record = get_tx(&Transaction::Read(&tx2), "tenant1")
+            .unwrap()
+            .unwrap();
 
         assert_eq!("tenant1", user_record.tenant_id);
         assert_eq!(0, user_record.usage);
@@ -183,14 +161,20 @@ mod test {
         // The existing read transaction retains its original snapshot.
         assert_eq!(
             0,
-            db.get_tx(&Transaction::Read(&tx2)).unwrap().unwrap().usage
+            get_tx(&Transaction::Read(&tx2), "tenant1")
+                .unwrap()
+                .unwrap()
+                .usage
         );
 
         // A new read transaction sees the committed update.
-        let tx3 = db.db.begin_read().unwrap();
+        let tx3 = db.begin_read().unwrap();
         assert_eq!(
             100,
-            db.get_tx(&Transaction::Read(&tx3)).unwrap().unwrap().usage
+            get_tx(&Transaction::Read(&tx3), "tenant1")
+                .unwrap()
+                .unwrap()
+                .usage
         );
     }
 }

@@ -1,12 +1,8 @@
-use std::sync::Arc;
-
+use super::tx::Transaction;
 use cloudsync_common::FileMeta;
-use redb::{Database, MultimapTableDefinition, ReadableTable, Table, TableDefinition};
+use redb::{Database, MultimapTableDefinition, ReadableTable, TableDefinition};
 
-use crate::{
-    auth::UserContext,
-    db::{db_tenants::TABLE_TENANTS, db_upload::TABLE_UPLOADS},
-};
+use crate::db::{db_tenants::TABLE_TENANTS, db_upload::TABLE_UPLOADS};
 
 pub const TABLE_FILES: TableDefinition<&str, &[u8]> = TableDefinition::new("files");
 pub const INDEX_FILES_BY_TENANT_HASH: MultimapTableDefinition<&str, &[u8]> =
@@ -25,163 +21,83 @@ pub fn open_db(db_path: &str) -> anyhow::Result<Database> {
     Ok(db)
 }
 
-pub struct TenantFileMetaDb {
-    db: Arc<Database>,
-    user_context: UserContext,
+pub fn get_tx(tx: &Transaction, tenant_id: &str, path: &str) -> anyhow::Result<Option<FileMeta>> {
+    match tx {
+        Transaction::Read(tx) => {
+            let table = tx.open_table(TABLE_FILES)?;
+            get_table(&table, tenant_id, path)
+        }
+        Transaction::Write(tx) => {
+            let table = tx.open_table(TABLE_FILES)?;
+            get_table(&table, tenant_id, path)
+        }
+    }
 }
 
-impl TenantFileMetaDb {
-    pub fn new(db: Arc<Database>, user_context: UserContext) -> Self {
-        TenantFileMetaDb { db, user_context }
-    }
+fn get_table(
+    table: &impl ReadableTable<&'static str, &'static [u8]>,
+    tenant_id: &str,
+    path: &str,
+) -> anyhow::Result<Option<FileMeta>> {
+    let keyed_path = make_key(tenant_id, path);
+    let entry = table.get(keyed_path.as_str())?;
+    let Some(entry) = entry else {
+        return Ok(None);
+    };
+    let bytes = entry.value();
+    let file_meta = serde_json::from_slice::<FileMeta>(bytes)?;
+    Ok(Some(file_meta))
+}
 
-    pub fn list(&self) -> Result<Vec<FileMeta>, anyhow::Error> {
-        let tx = self.db.begin_read()?;
-        let table = tx.open_table(TABLE_FILES)?;
+pub fn put_tx(
+    tx: &redb::WriteTransaction,
+    tenant_id: &str,
+    user_id: &str,
+    path: &str,
+    size: u64,
+    content_hash: &str,
+) -> anyhow::Result<FileMeta> {
+    let mut file_meta = FileMeta {
+        path: path.to_string(),
+        size,
+        content_hash: content_hash.to_string(),
+        version: 1,
+        is_deleted: false,
+        created_at: chrono::Utc::now(),
+        modified_at: chrono::Utc::now(),
+        tenant_id: tenant_id.to_owned(),
+        user_id: user_id.to_owned(),
+    };
 
-        let mut file_metas: Vec<FileMeta> = Vec::new();
-        let start = format!("{}\0", self.user_context.tenant_id);
-        let end = format!("{}\u{1}", self.user_context.tenant_id);
-        for entry in table.range(start.as_str()..end.as_str())? {
-            let (_key, val) = entry?;
-            let bytes = val.value();
-            let file_meta = serde_json::from_slice::<FileMeta>(bytes)?;
-            if file_meta.is_deleted {
-                continue;
-            }
-            file_metas.push(file_meta);
-        }
-
-        Ok(file_metas)
-    }
-
-    pub fn get(&self, path: &str) -> Result<Option<FileMeta>, anyhow::Error> {
-        let tx = self.db.begin_read()?;
-        let table = tx.open_table(TABLE_FILES)?;
-        self.get_table(&table, path)
-    }
-
-    pub fn get_tx(
-        &self,
-        tx: &redb::WriteTransaction,
-        path: &str,
-    ) -> Result<Option<FileMeta>, anyhow::Error> {
-        let table = tx.open_table(TABLE_FILES)?;
-        self.get_table(&table, path)
-    }
-
-    fn get_table(
-        &self,
-        table: &impl ReadableTable<&'static str, &'static [u8]>,
-        path: &str,
-    ) -> anyhow::Result<Option<FileMeta>> {
-        let keyed_path = self.make_key(path);
+    let keyed_path = make_key(tenant_id, path);
+    let mut table = tx.open_table(TABLE_FILES)?;
+    {
         let entry = table.get(keyed_path.as_str())?;
-        let Some(entry) = entry else {
-            return Ok(None);
-        };
-        let bytes = entry.value();
-        let file_meta = serde_json::from_slice::<FileMeta>(bytes)?;
-        Ok(Some(file_meta))
-    }
-
-    #[cfg(test)]
-    pub fn put(&self, path: &str, size: u64, content_hash: &str) -> anyhow::Result<FileMeta> {
-        let tx = self.db.begin_write()?;
-        let file_meta = self.put_tx(&tx, path, size, content_hash)?;
-        tx.commit()?;
-        Ok(file_meta)
-    }
-
-    pub fn put_tx(
-        &self,
-        tx: &redb::WriteTransaction,
-        path: &str,
-        size: u64,
-        content_hash: &str,
-    ) -> anyhow::Result<FileMeta> {
-        let file_meta = {
-            let mut table = tx.open_table(TABLE_FILES)?;
-            self.put_table(tx, &mut table, path, size, content_hash)?
-        };
-        let keyed_path = self.make_key(path);
-        let index_key = make_index_key(&self.user_context.tenant_id, content_hash);
-        {
+        if let Some(entry) = entry {
+            let bytes = entry.value();
+            let file_meta_old = serde_json::from_slice::<FileMeta>(bytes)?;
+            file_meta.version = file_meta_old.version + 1;
+            file_meta.created_at = file_meta_old.created_at;
+            // If an entry exists we need to update the index
+            let old_hash = file_meta_old.content_hash;
+            let index_key = make_index_key(tenant_id, &old_hash);
             let mut table = tx.open_multimap_table(INDEX_FILES_BY_TENANT_HASH)?;
-            table.insert(index_key.as_str(), keyed_path.as_bytes())?;
+            table.remove(index_key.as_str(), keyed_path.as_bytes())?;
         }
-
-        Ok(file_meta)
     }
 
-    fn put_table(
-        &self,
-        tx: &redb::WriteTransaction,
-        table: &mut Table<'_, &'static str, &'static [u8]>,
-        path: &str,
-        size: u64,
-        content_hash: &str,
-    ) -> anyhow::Result<FileMeta> {
-        let mut file_meta = FileMeta {
-            path: path.to_string(),
-            size,
-            content_hash: content_hash.to_string(),
-            version: 1,
-            is_deleted: false,
-            created_at: chrono::Utc::now(),
-            modified_at: chrono::Utc::now(),
-            tenant_id: self.user_context.tenant_id.clone(),
-            user_id: self.user_context.user_id.clone(),
-        };
-
-        let keyed_path = self.make_key(path);
-        {
-            let entry = table.get(keyed_path.as_str())?;
-            if let Some(entry) = entry {
-                let bytes = entry.value();
-                let file_meta_old = serde_json::from_slice::<FileMeta>(bytes)?;
-                file_meta.version = file_meta_old.version + 1;
-                file_meta.created_at = file_meta_old.created_at;
-                // If an entry exists we need to update the index
-                let old_hash = file_meta_old.content_hash;
-                let index_key = make_index_key(&self.user_context.tenant_id, &old_hash);
-                let mut table = tx.open_multimap_table(INDEX_FILES_BY_TENANT_HASH)?;
-                table.remove(index_key.as_str(), keyed_path.as_bytes())?;
-            }
-        }
-
-        {
-            let bytes = serde_json::to_vec(&file_meta)?;
-            table.insert(keyed_path.as_str(), bytes.as_slice())?;
-        }
-
-        Ok(file_meta)
+    {
+        let bytes = serde_json::to_vec(&file_meta)?;
+        table.insert(keyed_path.as_str(), bytes.as_slice())?;
     }
 
-    pub fn delete(&self, path: &str) -> anyhow::Result<()> {
-        let tx = self.db.begin_read()?;
-        let table = tx.open_table(TABLE_FILES)?;
-        let keyed_path = self.make_key(path);
-        let entry = table.get(keyed_path.as_str())?;
-        let Some(entry) = entry else { return Ok(()) };
-        let bytes = entry.value();
-        let mut file_meta = serde_json::from_slice::<FileMeta>(bytes)?;
-        file_meta.is_deleted = true;
-        drop(table);
-
-        let tx = self.db.begin_write()?;
-        {
-            let mut table = tx.open_table(TABLE_FILES)?;
-            let bytes = serde_json::to_vec(&file_meta)?;
-            table.insert(keyed_path.as_str(), bytes.as_slice())?;
-        }
-        tx.commit()?;
-        Ok(())
+    drop(table);
+    {
+        let index_key = make_index_key(tenant_id, content_hash);
+        let mut index = tx.open_multimap_table(INDEX_FILES_BY_TENANT_HASH)?;
+        index.insert(index_key.as_str(), keyed_path.as_bytes())?;
     }
-
-    fn make_key(&self, path: &str) -> String {
-        make_key(&self.user_context.tenant_id, path)
-    }
+    Ok(file_meta)
 }
 
 pub fn make_key(tenant_id: &str, path: &str) -> String {
@@ -198,9 +114,48 @@ pub fn decode_key(key: &str) -> anyhow::Result<(&str, &str)> {
         .ok_or_else(|| anyhow::anyhow!("invalid key"))
 }
 
+/// Tombstone the current row in the caller's writer; retain attribution, version and index.
+pub fn delete_tx(tx: &redb::WriteTransaction, tenant_id: &str, path: &str) -> anyhow::Result<()> {
+    let mut table = tx.open_table(TABLE_FILES)?;
+    let key = make_key(tenant_id, path);
+    let Some(mut file) = get_table(&table, tenant_id, path)? else {
+        return Ok(());
+    };
+    file.is_deleted = true;
+    let bytes = serde_json::to_vec(&file)?;
+    table.insert(key.as_str(), bytes.as_slice())?;
+    Ok(())
+}
+
+pub fn list_tx(tx: &Transaction, tenant_id: &str) -> anyhow::Result<Vec<FileMeta>> {
+    match tx {
+        Transaction::Read(tx) => list_table(&tx.open_table(TABLE_FILES)?, tenant_id),
+        Transaction::Write(tx) => list_table(&tx.open_table(TABLE_FILES)?, tenant_id),
+    }
+}
+
+fn list_table(
+    table: &impl ReadableTable<&'static str, &'static [u8]>,
+    tenant_id: &str,
+) -> anyhow::Result<Vec<FileMeta>> {
+    let mut files = Vec::new();
+    let start = format!("{tenant_id}\0");
+    let end = format!("{tenant_id}\u{1}");
+    for entry in table.range(start.as_str()..end.as_str())? {
+        let (_, value) = entry?;
+        let file: FileMeta = serde_json::from_slice(value.value())?;
+        if !file.is_deleted {
+            files.push(file);
+        }
+    }
+    Ok(files)
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::db::tx::{with_read_transaction, with_write_transaction};
+    use std::sync::Arc;
 
     use cloudsync_common::hash_bytes;
     use tempfile::TempDir;
@@ -215,14 +170,70 @@ mod test {
         (dir, db)
     }
 
-    fn test_tenant(db: Arc<Database>, tenant_id: Option<String>) -> TenantFileMetaDb {
-        TenantFileMetaDb {
-            db,
-            user_context: UserContext {
-                tenant_id: tenant_id.unwrap_or("tenant1".to_string()),
-                user_id: "user1".to_string(),
-            },
+    struct TestTenant {
+        db: Arc<Database>,
+        tenant_id: String,
+        user_id: String,
+    }
+    impl TestTenant {
+        fn put(&self, path: &str, size: u64, hash: &str) -> anyhow::Result<FileMeta> {
+            with_write_transaction(&self.db, |tx| {
+                put_tx(tx, &self.tenant_id, &self.user_id, path, size, hash)
+            })
         }
+        fn put_tx(
+            &self,
+            tx: &redb::WriteTransaction,
+            path: &str,
+            size: u64,
+            hash: &str,
+        ) -> anyhow::Result<FileMeta> {
+            put_tx(tx, &self.tenant_id, &self.user_id, path, size, hash)
+        }
+        fn get(&self, path: &str) -> anyhow::Result<Option<FileMeta>> {
+            with_read_transaction(&self.db, |tx| {
+                get_tx(&Transaction::Read(tx), &self.tenant_id, path)
+            })
+        }
+        fn list(&self) -> anyhow::Result<Vec<FileMeta>> {
+            with_read_transaction(&self.db, |tx| {
+                list_tx(&Transaction::Read(tx), &self.tenant_id)
+            })
+        }
+        fn delete(&self, path: &str) -> anyhow::Result<()> {
+            with_write_transaction(&self.db, |tx| delete_tx(tx, &self.tenant_id, path))
+        }
+    }
+    fn test_tenant(db: Arc<Database>, tenant_id: Option<String>) -> TestTenant {
+        TestTenant {
+            db,
+            tenant_id: tenant_id.unwrap_or("tenant1".into()),
+            user_id: "user1".into(),
+        }
+    }
+
+    #[test]
+    fn replacement_preserves_creation_and_updates_attribution() {
+        let (_dir, db) = test_db();
+        let db = Arc::new(db);
+        let first_user = test_tenant(db.clone(), None);
+        let second_user = TestTenant {
+            db: db.clone(),
+            tenant_id: "tenant1".into(),
+            user_id: "user2".into(),
+        };
+        let first = first_user.put("file", 3, "old").unwrap();
+        first_user.delete("file").unwrap();
+        let deleted = first_user.get("file").unwrap().unwrap();
+        let mut expected = serde_json::to_value(&first).unwrap();
+        expected["is_deleted"] = true.into();
+        assert_eq!(serde_json::to_value(deleted).unwrap(), expected);
+        let replaced = second_user.put("file", 4, "new").unwrap();
+        assert_eq!(replaced.created_at, first.created_at);
+        assert!(replaced.modified_at >= first.modified_at);
+        assert_eq!(replaced.version, 2);
+        assert_eq!(replaced.user_id, "user2");
+        assert!(!replaced.is_deleted);
     }
 
     #[test]
@@ -416,5 +427,46 @@ mod test {
         let (dec_tenant_id, dec_path) = decode_key(value).unwrap();
         assert_eq!(dec_tenant_id, tenanta_name);
         assert_eq!(dec_path, path);
+    }
+    #[test]
+    fn deletion_preserves_replacement_at_writer_boundary() {
+        let (_dir, db) = test_db();
+        let db = Arc::new(db);
+        let tenant = test_tenant(db.clone(), None);
+        tenant.put("file", 3, "old").unwrap();
+        let old_snapshot = db.begin_read().unwrap();
+        let tx = db.begin_write().unwrap();
+        let replacement = put_tx(&tx, "tenant1", "replacer", "file", 7, "replacement").unwrap();
+        // A deletion composed with an uncommitted replacement must read that writer,
+        // never capture the old metadata from a separate snapshot.
+        delete_tx(&tx, "tenant1", "file").unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            get_tx(&Transaction::Read(&old_snapshot), "tenant1", "file")
+                .unwrap()
+                .unwrap()
+                .content_hash,
+            "old"
+        );
+        let deleted = tenant.get("file").unwrap().unwrap();
+        let mut expected = serde_json::to_value(replacement).unwrap();
+        expected["is_deleted"] = true.into();
+        assert_eq!(serde_json::to_value(deleted).unwrap(), expected);
+        let tx = db.begin_read().unwrap();
+        let index = tx.open_multimap_table(INDEX_FILES_BY_TENANT_HASH).unwrap();
+        assert_eq!(
+            index
+                .get(make_index_key("tenant1", "replacement").as_str())
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            index
+                .get(make_index_key("tenant1", "old").as_str())
+                .unwrap()
+                .len(),
+            0
+        );
     }
 }
