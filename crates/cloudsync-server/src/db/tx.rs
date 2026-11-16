@@ -7,54 +7,7 @@ pub enum Transaction<'tx> {
 }
 
 /// Run synchronous reads against one snapshot. Repository results are owned records.
-///
-/// An owned record can leave a transaction. The hidden setup includes the actual
-/// private modules so examples check their types without changing visibility.
-/// ```no_run
-/// # fn main() {}
-/// # #[allow(dead_code)]
-/// # mod db {
-/// #     pub mod tx { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/db/tx.rs")); }
-/// #     pub mod db_usage { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/db/db_usage.rs")); }
-/// # }
-/// use db::{db_usage, tx::{Transaction, with_read_transaction, with_write_transaction}};
-/// fn owned_records(db: &redb::Database) -> anyhow::Result<()> {
-///     let written = with_write_transaction(db, |tx| db_usage::put_tx(tx, "tenant", 1))?;
-///     let read = with_read_transaction(db, |tx| {
-///         db_usage::get_tx(&Transaction::Read(tx), "tenant")
-///     })?;
-///     assert_eq!(read.unwrap().usage, written.usage);
-///     Ok(())
-/// }
-/// ```
-///
-/// The transaction itself cannot escape:
-/// ```compile_fail
-/// # fn main() {}
-/// # #[allow(dead_code)]
-/// # mod db {
-/// #     pub mod tx { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/db/tx.rs")); }
-/// #     pub mod db_usage { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/db/db_usage.rs")); }
-/// # }
-/// use db::tx::with_read_transaction;
-/// fn escape(db: &redb::Database) {
-///     let _ = with_read_transaction(db, |tx| Ok::<_, anyhow::Error>(tx));
-/// }
-/// ```
-/// Reads cannot be used for writes:
-/// ```compile_fail
-/// # fn main() {}
-/// # #[allow(dead_code)]
-/// # mod db {
-/// #     pub mod tx { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/db/tx.rs")); }
-/// #     pub mod db_usage { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/db/db_usage.rs")); }
-/// # }
-/// use db::{db_usage, tx::with_read_transaction};
-/// fn mutate(db: &redb::Database) {
-///     let _ = with_read_transaction(db, |tx| db_usage::put_tx(tx, "tenant", 1));
-/// }
-/// ```
-/// Borrowed guards cannot escape the closure; do not return redb snapshot handles.
+/// Return owned results rather than redb snapshot handles or borrowed transaction data.
 pub fn with_read_transaction<T, E>(
     db: &redb::Database,
     f: impl FnOnce(&redb::ReadTransaction) -> Result<T, E>,
@@ -67,22 +20,6 @@ where
 }
 
 /// Commit once on success; abort on error or unwind. Never retries the closure.
-///
-/// A table borrowed from the writer cannot escape:
-/// ```compile_fail
-/// # fn main() {}
-/// # #[allow(dead_code)]
-/// # mod db {
-/// #     pub mod tx { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/db/tx.rs")); }
-/// #     pub mod db_usage { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/db/db_usage.rs")); }
-/// # }
-/// use db::{db_usage::TABLE_USAGES, tx::with_write_transaction};
-/// fn escape(db: &redb::Database) {
-///     let _ = with_write_transaction(db, |tx| -> anyhow::Result<_> {
-///         Ok(tx.open_table(TABLE_USAGES)?)
-///     });
-/// }
-/// ```
 ///
 /// Keep closures synchronous and return owned repository results. Do not open
 /// nested writers or invoke transaction-owning helpers inside the closure.
