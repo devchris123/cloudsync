@@ -1,4 +1,4 @@
-use crate::db::tx::Transaction;
+use crate::db::tx::{Transaction, with_read_transaction, with_write_transaction};
 use crate::db::{db_file, db_pending_blob_deletions, db_upload, db_usage};
 use crate::{auth::UserContext, storage};
 use cloudsync_common::{FileMeta, InitUploadRequest, hash_bytes};
@@ -103,14 +103,17 @@ impl TenantFileService {
     /// # Errors
     /// Returns `ServiceError::NotFound` if the file does not exist.
     pub fn get_file(&self, path: &str) -> Result<FileMeta, ServiceError> {
-        db_file::TenantFileMetaDb::new(self.db.clone(), self.ctx.clone())
-            .get(path)?
-            .ok_or(ServiceError::NotFound)
+        with_read_transaction(&self.db, |tx| {
+            db_file::get_tx(&Transaction::Read(tx), &self.ctx.tenant_id, path)
+        })?
+        .ok_or(ServiceError::NotFound)
     }
 
     /// List all files for the current tenant.
     pub fn list_files(&self) -> Result<Vec<FileMeta>, ServiceError> {
-        Ok(db_file::TenantFileMetaDb::new(self.db.clone(), self.ctx.clone()).list()?)
+        Ok(with_read_transaction(&self.db, |tx| {
+            db_file::list_tx(&Transaction::Read(tx), &self.ctx.tenant_id)
+        })?)
     }
 
     /// Marks a file as deleted without removing its stored blob.
@@ -118,7 +121,9 @@ impl TenantFileService {
     /// Succeeds if the path does not exist or is already deleted.
     /// Stored bytes remain charged against the tenant's quota.
     pub fn delete_file(&self, path: &str) -> Result<(), ServiceError> {
-        db_file::TenantFileMetaDb::new(self.db.clone(), self.ctx.clone()).delete(path)?;
+        with_write_transaction(&self.db, |tx| {
+            db_file::delete_tx(tx, &self.ctx.tenant_id, path)
+        })?;
         tracing::debug!(tenant_id = self.ctx.tenant_id, "file metadata soft-deleted");
         Ok(())
     }
@@ -128,40 +133,47 @@ impl TenantFileService {
     /// # Errors
     /// Returns `ServiceError::QuotaExceeded` if the operation would exceed the tenant's storage quota.
     pub fn create_file(&self, path: &str, content: &[u8]) -> Result<FileMeta, ServiceError> {
-        let usage_db = db_usage::TenantUsageDb::new(self.db.clone(), self.ctx.clone());
-        let tx = self.db.begin_write().map_err(anyhow::Error::from)?;
-        let usage = self.get_usage(&tx)?;
+        let file_meta = with_write_transaction(&self.db, |tx| -> Result<_, ServiceError> {
+            let usage = self.get_usage(tx)?;
 
-        let db_file = db_file::TenantFileMetaDb::new(self.db.clone(), self.ctx.clone());
+            let mut content_hash = hash_bytes(content);
 
-        let mut content_hash = hash_bytes(content);
+            // Check if the blob is currently being garbage collected.
+            let exists = db_pending_blob_deletions::exists_tx(
+                &Transaction::Write(tx),
+                &self.ctx.tenant_id,
+                &content_hash,
+            )?;
+            if exists {
+                return Err(ServiceError::Conflict(format!(
+                    "content hash {} is currently being garbage collected",
+                    content_hash
+                )));
+            }
 
-        // Check if the blob is currently being garbage collected.
-        let pending_del_db =
-            db_pending_blob_deletions::PendingBlobDeletionDb::new(self.ctx.clone());
-        let exists = pending_del_db.exists_tx(&tx, &content_hash)?;
-        if exists {
-            return Err(ServiceError::Conflict(format!(
-                "content hash {} is currently being garbage collected",
-                content_hash
-            )));
-        }
+            let content_size = content.len() as u64;
+            let exist = self.check_quota(tx, &content_hash, content_size, usage)?;
 
-        let content_size = content.len() as u64;
-        let exist = self.check_quota(&tx, &content_hash, content_size, usage)?;
+            if !exist {
+                db_usage::put_tx(tx, &self.ctx.tenant_id, usage + content_size)?;
+                content_hash = storage::write(&self.storage_dir, &self.ctx.tenant_id, content)?;
+            }
 
-        if !exist {
-            usage_db.put_tx(&tx, usage + content_size)?;
-            content_hash = storage::write(&self.storage_dir, &self.ctx.tenant_id, content)?;
-        }
-
-        let file_meta = db_file.put_tx(&tx, path, content_size, &content_hash)?;
-        tx.commit()?;
+            let file_meta = db_file::put_tx(
+                tx,
+                &self.ctx.tenant_id,
+                &self.ctx.user_id,
+                path,
+                content_size,
+                &content_hash,
+            )?;
+            Ok(file_meta)
+        })?;
         tracing::debug!(
             tenant_id = self.ctx.tenant_id,
-            blob_hash = content_hash,
+            blob_hash = file_meta.content_hash,
             version = file_meta.version,
-            size_bytes = content_size,
+            size_bytes = file_meta.size,
             "file upload committed"
         );
 
@@ -179,25 +191,27 @@ impl TenantFileService {
     /// Returns `ServiceError::QuotaExceeded` if the operation would exceed the tenant's storage quota.
     /// Returns `ServiceError::Validation` if the request is invalid.
     pub fn create_upload(&self, request: InitUploadRequest) -> Result<String, ServiceError> {
-        let tx = self.db.begin_write().map_err(anyhow::Error::from)?;
-        let usage = self.get_usage(&tx)?;
+        let upload = with_write_transaction(&self.db, |tx| -> Result<_, ServiceError> {
+            let usage = self.get_usage(tx)?;
 
-        // Check if the blob is currently being garbage collected.
-        let pending_del_db =
-            db_pending_blob_deletions::PendingBlobDeletionDb::new(self.ctx.clone());
-        let exists = pending_del_db.exists_tx(&tx, &request.total_hash)?;
-        if exists {
-            return Err(ServiceError::Conflict(format!(
-                "content hash {} is currently being garbage collected",
-                request.total_hash
-            )));
-        }
+            // Check if the blob is currently being garbage collected.
+            let exists = db_pending_blob_deletions::exists_tx(
+                &Transaction::Write(tx),
+                &self.ctx.tenant_id,
+                &request.total_hash,
+            )?;
+            if exists {
+                return Err(ServiceError::Conflict(format!(
+                    "content hash {} is currently being garbage collected",
+                    request.total_hash
+                )));
+            }
 
-        self.check_quota(&tx, &request.total_hash, request.total_size, usage)?;
+            self.check_quota(tx, &request.total_hash, request.total_size, usage)?;
 
-        let scoped_db = db_upload::TenantUploadDb::new(self.db.clone(), self.ctx.clone());
-        let upload = scoped_db.create_tx(&tx, request)?;
-        tx.commit()?;
+            let upload = db_upload::create_tx(tx, &self.ctx.tenant_id, &self.ctx.user_id, request)?;
+            Ok(upload)
+        })?;
         let upload_staging_dir = self.staging_dir.join(&upload.upload_id);
         std::fs::create_dir_all(upload_staging_dir)?;
         tracing::debug!(
@@ -211,8 +225,7 @@ impl TenantFileService {
     }
 
     fn get_usage(&self, tx: &redb::WriteTransaction) -> anyhow::Result<u64> {
-        let usage_db = db_usage::TenantUsageDb::new(self.db.clone(), self.ctx.clone());
-        let usage = usage_db.get_tx(&Transaction::Write(tx))?;
+        let usage = db_usage::get_tx(&Transaction::Write(tx), &self.ctx.tenant_id)?;
         let usage = match usage {
             Some(usage) => usage.usage,
             None => {
@@ -220,7 +233,7 @@ impl TenantFileService {
                     tenant_id = self.ctx.tenant_id,
                     "initializing usage record in transaction"
                 );
-                usage_db.put_tx(tx, 0)?.usage
+                db_usage::put_tx(tx, &self.ctx.tenant_id, 0)?.usage
             }
         };
         Ok(usage)
@@ -244,9 +257,7 @@ impl TenantFileService {
         }
 
         // Check uploads for reserved usage
-        let db_upload = db_upload::TenantUploadDb::new(self.db.clone(), self.ctx.clone());
-        let upload_usage: u64 = db_upload
-            .list_tx(tx)?
+        let upload_usage: u64 = db_upload::list_tx(&Transaction::Write(tx), &self.ctx.tenant_id)?
             .iter()
             .map(|u| u.total_size)
             .try_fold(0_u64, |sum, size| -> Result<u64, ServiceError> {
@@ -283,8 +294,9 @@ impl TenantFileService {
         index: u64,
         body: &[u8],
     ) -> Result<(), ServiceError> {
-        let scoped_db = db_upload::TenantUploadDb::new(self.db.clone(), self.ctx.clone());
-        let upload = scoped_db.get(upload_id)?;
+        let upload = with_read_transaction(&self.db, |tx| {
+            db_upload::get_tx(&Transaction::Read(tx), &self.ctx.tenant_id, upload_id)
+        })?;
 
         let Some(upload) = upload else {
             return Err(ServiceError::NotFound);
@@ -304,7 +316,15 @@ impl TenantFileService {
         let upload_staging_dir = self.staging_dir.join(upload_id);
         let chunk_path = upload_staging_dir.join(index.to_string());
         std::fs::write(chunk_path, body)?;
-        scoped_db.add_chunk(upload_id, index)?;
+        // Preserve the existing duplicate-chunk path: release the writer without
+        // committing when there is no metadata change.
+        let tx = self.db.begin_write().map_err(anyhow::Error::from)?;
+        let current = db_upload::get_tx(&Transaction::Write(&tx), &self.ctx.tenant_id, upload_id)?
+            .ok_or_else(|| anyhow::anyhow!("upload not found: {}", upload_id))?;
+        if !current.chunks_received.contains(&index) {
+            db_upload::add_chunk_tx(&tx, &self.ctx.tenant_id, upload_id, index)?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -318,13 +338,9 @@ impl TenantFileService {
     /// Returns `ServiceError::QuotaExceeded` if the operation would exceed the tenant's storage quota.
     /// Returns `ServiceError::HashMismatch` if the reassembled file's hash does not match the expected hash.
     pub fn finalize_upload(&self, upload_id: &str) -> Result<FileMeta, ServiceError> {
-        let upload_db: db_upload::TenantUploadDb =
-            db_upload::TenantUploadDb::new(self.db.clone(), self.ctx.clone());
-        let usage_db = db_usage::TenantUsageDb::new(self.db.clone(), self.ctx.clone());
-
         let tx = self.db.begin_write().map_err(anyhow::Error::from)?;
 
-        let upload = upload_db.get_tx(&tx, upload_id)?;
+        let upload = db_upload::get_tx(&Transaction::Write(&tx), &self.ctx.tenant_id, upload_id)?;
 
         let Some(upload) = upload else {
             tx.commit()?;
@@ -355,8 +371,8 @@ impl TenantFileService {
                 &upload.total_hash,
                 upload.total_size,
             )?;
-            let usage = usage_db.get_tx(&Transaction::Write(&tx))?.unwrap();
-            usage_db.put_tx(&tx, usage.usage + seen_bytes)?;
+            let usage = db_usage::get_tx(&Transaction::Write(&tx), &self.ctx.tenant_id)?.unwrap();
+            db_usage::put_tx(&tx, &self.ctx.tenant_id, usage.usage + seen_bytes)?;
         } else {
             let meta = std::fs::metadata(storage_path)?;
             let size = meta.len();
@@ -370,9 +386,16 @@ impl TenantFileService {
         // `db.put_tx` overwrites any prior row at this path — including a soft-deleted
         // one — bumping `version` and resetting `is_deleted`, so the re-upload of a
         // previously-deleted file lands as a fresh row without special-casing here.
-        let scoped_db = db_file::TenantFileMetaDb::new(self.db.clone(), self.ctx.clone());
-        let file = scoped_db.put_tx(&tx, &upload.path, upload.total_size, &upload.total_hash)?;
-        upload_db.delete_tx(&tx, upload_id)?;
+
+        let file = db_file::put_tx(
+            &tx,
+            &self.ctx.tenant_id,
+            &self.ctx.user_id,
+            &upload.path,
+            upload.total_size,
+            &upload.total_hash,
+        )?;
+        db_upload::delete_tx(&tx, &self.ctx.tenant_id, upload_id)?;
         tx.commit()?;
         if let Err(err) = std::fs::remove_dir_all(upload_staging_dir) {
             tracing::warn!(tenant_id = self.ctx.tenant_id, upload_id, error = ?err,
@@ -420,12 +443,11 @@ mod test {
     }
 
     fn finalize_state(db: &Arc<Database>, ctx: &UserContext, upload_id: &str) -> serde_json::Value {
-        let usage_db = db_usage::TenantUsageDb::new(db.clone(), ctx.clone());
         let tx = db.begin_read().unwrap();
         serde_json::json!({
-            "usage": usage_db.get_tx(&Transaction::Read(&tx)).unwrap(),
-            "files": db_file::TenantFileMetaDb::new(db.clone(), ctx.clone()).list().unwrap(),
-            "upload": db_upload::TenantUploadDb::new(db.clone(), ctx.clone()).get(upload_id).unwrap(),
+            "usage": db_usage::get_tx(&Transaction::Read(&tx), &ctx.tenant_id).unwrap(),
+            "files": with_read_transaction(&db, |tx| db_file::list_tx(&Transaction::Read(tx), &ctx.tenant_id)).unwrap(),
+            "upload": with_read_transaction(&db, |tx| db_upload::get_tx(&Transaction::Read(tx), &ctx.tenant_id, upload_id)).unwrap(),
         })
     }
 
@@ -506,19 +528,23 @@ mod test {
             let (_dir, db, service) = test_service(u64::MAX);
             let ctx = service.ctx.clone();
 
-            let upload_db = db_upload::TenantUploadDb::new(db.clone(), ctx.clone());
-
             // Seed extreme reservations directly to exercise the service's
             // arithmetic independently of HTTP input-size validation.
             for total_size in reservation_sizes {
-                upload_db
-                    .create(InitUploadRequest {
-                        path: "pending".to_string(),
-                        total_size,
-                        total_hash: hash_bytes(b"pending"),
-                        chunk_count: 1,
-                    })
-                    .unwrap();
+                with_write_transaction(&db, |tx| {
+                    db_upload::create_tx(
+                        tx,
+                        &ctx.tenant_id,
+                        &ctx.user_id,
+                        InitUploadRequest {
+                            path: "pending".to_string(),
+                            total_size,
+                            total_hash: hash_bytes(b"pending"),
+                            chunk_count: 1,
+                        },
+                    )
+                })
+                .unwrap();
             }
 
             let tx = db.begin_write().unwrap();
@@ -534,9 +560,8 @@ mod test {
         let (_dir, db, mut service) = test_service(11);
         let ctx = service.ctx.clone();
 
-        let usage_db = db_usage::TenantUsageDb::new(db.clone(), ctx.clone());
         let tx = db.begin_read().unwrap();
-        let usage = usage_db.get_tx(&Transaction::Read(&tx)).unwrap();
+        let usage = db_usage::get_tx(&Transaction::Read(&tx), &ctx.tenant_id).unwrap();
         assert!(usage.is_none());
 
         // New path, new content -> succeed and increase usage
@@ -545,7 +570,9 @@ mod test {
         // New path, new content -> succeed and increase usage
         assert!(file_meta.is_ok());
         let tx = db.begin_read().unwrap();
-        let usage = usage_db.get_tx(&Transaction::Read(&tx)).unwrap().unwrap();
+        let usage = db_usage::get_tx(&Transaction::Read(&tx), &ctx.tenant_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(usage.usage, 11);
 
         service.default_user_quota_bytes = 22;
@@ -553,14 +580,18 @@ mod test {
         let file_meta = service.create_file("testpath2", b"tsetcontent");
         assert!(file_meta.is_ok());
         let tx = db.begin_read().unwrap();
-        let usage = usage_db.get_tx(&Transaction::Read(&tx)).unwrap().unwrap();
+        let usage = db_usage::get_tx(&Transaction::Read(&tx), &ctx.tenant_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(usage.usage, 22);
 
         // new path, old content -> succeed and keep usage the same
         let file_meta = service.create_file("testpath3", b"tsetcontent");
         assert!(file_meta.is_ok());
         let tx = db.begin_read().unwrap();
-        let usage = usage_db.get_tx(&Transaction::Read(&tx)).unwrap().unwrap();
+        let usage = db_usage::get_tx(&Transaction::Read(&tx), &ctx.tenant_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(usage.usage, 22);
 
         // existing path, new content, limited quota -> fails with QuotaExceeded
@@ -571,7 +602,9 @@ mod test {
             ServiceError::QuotaExceeded
         ));
         let tx = db.begin_read().unwrap();
-        let usage = usage_db.get_tx(&Transaction::Read(&tx)).unwrap().unwrap();
+        let usage = db_usage::get_tx(&Transaction::Read(&tx), &ctx.tenant_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(22, usage.usage);
         assert!(storage::exist_storage_path(
             service.storage_dir.as_path(),
@@ -589,7 +622,9 @@ mod test {
         let file_meta = service.create_file("testpath3", b"newcontent");
         assert!(file_meta.is_ok());
         let tx = db.begin_read().unwrap();
-        let usage = usage_db.get_tx(&Transaction::Read(&tx)).unwrap().unwrap();
+        let usage = db_usage::get_tx(&Transaction::Read(&tx), &ctx.tenant_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(usage.usage, 32);
     }
 
@@ -673,8 +708,6 @@ mod test {
         let (_dir, db, mut service) = test_service(101);
         let ctx = service.ctx.clone();
 
-        let usage_db = db_usage::TenantUsageDb::new(db.clone(), ctx.clone());
-
         // Initial upload
         let upload_req = InitUploadRequest {
             path: "testpath".to_string(),
@@ -687,8 +720,7 @@ mod test {
         assert!(upload.is_ok());
         let tx = db.begin_read().unwrap();
         assert_eq!(
-            usage_db
-                .get_tx(&Transaction::Read(&tx))
+            db_usage::get_tx(&Transaction::Read(&tx), &ctx.tenant_id)
                 .unwrap()
                 .unwrap()
                 .usage,
@@ -708,8 +740,7 @@ mod test {
         assert!(upload.is_ok());
         let tx = db.begin_read().unwrap();
         assert_eq!(
-            usage_db
-                .get_tx(&Transaction::Read(&tx))
+            db_usage::get_tx(&Transaction::Read(&tx), &ctx.tenant_id)
                 .unwrap()
                 .unwrap()
                 .usage,
@@ -723,8 +754,7 @@ mod test {
         assert!(upload.is_ok());
         let tx = db.begin_read().unwrap();
         assert_eq!(
-            usage_db
-                .get_tx(&Transaction::Read(&tx))
+            db_usage::get_tx(&Transaction::Read(&tx), &ctx.tenant_id)
                 .unwrap()
                 .unwrap()
                 .usage,
@@ -834,8 +864,7 @@ mod test {
         assert!(res.is_ok(), "finalize_upload failed: {:?}", res.err());
 
         let tx = db.begin_read().unwrap();
-        let usage = db_usage::TenantUsageDb::new(db.clone(), ctx.clone())
-            .get_tx(&Transaction::Read(&tx))
+        let usage = db_usage::get_tx(&Transaction::Read(&tx), &ctx.tenant_id)
             .unwrap()
             .unwrap();
         assert_eq!(usage.usage, 6);
@@ -849,10 +878,11 @@ mod test {
         assert_eq!(file_meta.tenant_id, ctx.tenant_id);
         assert_eq!(file_meta.user_id, ctx.user_id);
 
-        let persisted = db_file::TenantFileMetaDb::new(db.clone(), ctx.clone())
-            .get("testpath")
-            .unwrap()
-            .unwrap();
+        let persisted = with_read_transaction(&db, |tx| {
+            db_file::get_tx(&Transaction::Read(tx), &ctx.tenant_id, "testpath")
+        })
+        .unwrap()
+        .unwrap();
         assert_eq!(
             serde_json::to_value(&persisted).unwrap(),
             serde_json::to_value(&file_meta).unwrap()
@@ -865,7 +895,9 @@ mod test {
         assert_eq!(std::fs::read(blob_path).unwrap(), b"abc123");
 
         // Upload is deleted after finalization
-        let upload = db_upload::TenantUploadDb::new(db.clone(), ctx.clone()).get(&upload_id);
+        let upload = with_read_transaction(&db, |tx| {
+            db_upload::get_tx(&Transaction::Read(tx), &ctx.tenant_id, &upload_id)
+        });
         assert!(
             upload.unwrap().is_none(),
             "upload should be deleted after finalization"
@@ -997,8 +1029,7 @@ mod test {
         assert!(res.is_ok(), "finalize_upload failed: {:?}", res.err());
 
         let tx = db.begin_read().unwrap();
-        let usage = db_usage::TenantUsageDb::new(db.clone(), ctx.clone())
-            .get_tx(&Transaction::Read(&tx))
+        let usage = db_usage::get_tx(&Transaction::Read(&tx), &ctx.tenant_id)
             .unwrap()
             .unwrap();
         assert_eq!(usage.usage, 6);

@@ -1,3 +1,4 @@
+use crate::db::tx::{Transaction, with_read_transaction};
 use std::collections::BTreeSet;
 
 use askama::Template;
@@ -12,7 +13,7 @@ use rust_embed::RustEmbed;
 use sha2::Sha256;
 
 use crate::auth::UserContext;
-use crate::{app::AppState, db::db_file::TenantFileMetaDb};
+use crate::{app::AppState, db::db_file};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -283,8 +284,10 @@ pub async fn browse(
     };
 
     let prefix = query.prefix.unwrap_or_default();
-    let db = TenantFileMetaDb::new(state.db.clone(), ctx);
-    let all_files = match db.list() {
+
+    let all_files = match with_read_transaction(&state.db, |tx| {
+        db_file::list_tx(&Transaction::Read(tx), &ctx.tenant_id)
+    }) {
         Ok(f) => f,
         Err(_) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to list files").into_response();
@@ -330,8 +333,9 @@ pub async fn partial_files(
     let prefix = query.prefix.unwrap_or_default();
     let needle = query.q.unwrap_or_default().to_lowercase();
 
-    let db = TenantFileMetaDb::new(state.db.clone(), ctx);
-    let all_files = match db.list() {
+    let all_files = match with_read_transaction(&state.db, |tx| {
+        db_file::list_tx(&Transaction::Read(tx), &ctx.tenant_id)
+    }) {
         Ok(f) => f,
         Err(_) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to list files").into_response();

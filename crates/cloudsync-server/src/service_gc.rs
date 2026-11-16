@@ -1,16 +1,14 @@
+use crate::db::tx::{Transaction, with_write_transaction};
 use std::{collections::HashSet, path::Path, sync::Arc};
 
 use anyhow::{Context, Result};
 use redb::{AccessGuard, Database, MultimapValue, ReadableMultimapTable, WriteTransaction};
 
 use crate::{
-    auth::UserContext,
     db::{
-        db_file::{INDEX_FILES_BY_TENANT_HASH, TenantFileMetaDb},
-        db_pending_blob_deletions::{PendingBlobDeletionDb, PendingBlobDeletionRecord},
-        db_tenants::TenantDb,
-        db_upload::TenantUploadDb,
-        db_usage::TenantUsageDb,
+        db_file::{self, INDEX_FILES_BY_TENANT_HASH},
+        db_pending_blob_deletions::{self, PendingBlobDeletionRecord},
+        db_tenants, db_upload, db_usage,
     },
     storage,
 };
@@ -38,12 +36,11 @@ impl GcReport {
 }
 
 pub fn garbage_collect_deleted_blobs(data_dir: &Path, db: Arc<Database>) -> Result<GcReport> {
-    let tenant_db = TenantDb::new();
     let tenants = {
         let tx = db
             .begin_read()
             .context("opening tenant discovery transaction")?;
-        tenant_db.list(&tx).context("listing tenants for GC")?
+        db_tenants::list_tx(&Transaction::Read(&tx)).context("listing tenants for GC")?
     };
     let mut report = GcReport::default();
     for tenant in tenants {
@@ -84,52 +81,36 @@ pub(crate) fn mark_blobs_for_garbage_collection(
     db: Arc<Database>,
     tenant_id: &str,
 ) -> Result<Vec<String>> {
-    let mut marked_blobs: Vec<String> = vec![];
-    let tx = db.begin_write()?;
-    {
-        let file_db = TenantFileMetaDb::new(
-            db.clone(),
-            UserContext {
-                tenant_id: tenant_id.to_string(),
-                user_id: tenant_id.to_string(),
-            },
-        );
-        let upload_db = TenantUploadDb::new(
-            db.clone(),
-            UserContext {
-                tenant_id: tenant_id.to_string(),
-                user_id: tenant_id.to_string(),
-            },
-        );
-        let active_upload_hashes: HashSet<String> = upload_db
-            .list_tx(&tx)?
-            .into_iter()
-            .map(|upload| upload.total_hash)
-            .collect();
-        let table = tx.open_multimap_table(INDEX_FILES_BY_TENANT_HASH)?;
-        let start = format!("{}\0", tenant_id);
-        let end = format!("{}\u{1}", tenant_id);
-        for index_entry in table.range(start.as_str()..end.as_str())? {
-            let index_entry = index_entry.context("reading blob reference index")?;
-            let (hash, marked) = mark_blob_for_garbage_collection(
-                &tx,
-                &file_db,
-                &active_upload_hashes,
-                data_dir,
-                index_entry,
-            )?;
-            if marked {
-                marked_blobs.push(hash.to_string());
+    with_write_transaction(&db, |tx| {
+        let mut marked_blobs: Vec<String> = vec![];
+        {
+            let active_upload_hashes: HashSet<String> =
+                db_upload::list_tx(&Transaction::Write(tx), tenant_id)?
+                    .into_iter()
+                    .map(|upload| upload.total_hash)
+                    .collect();
+            let table = tx.open_multimap_table(INDEX_FILES_BY_TENANT_HASH)?;
+            let start = format!("{}\0", tenant_id);
+            let end = format!("{}\u{1}", tenant_id);
+            for index_entry in table.range(start.as_str()..end.as_str())? {
+                let index_entry = index_entry.context("reading blob reference index")?;
+                let (hash, marked) = mark_blob_for_garbage_collection(
+                    tx,
+                    &active_upload_hashes,
+                    data_dir,
+                    index_entry,
+                )?;
+                if marked {
+                    marked_blobs.push(hash.to_string());
+                }
             }
         }
-    }
-    tx.commit()?;
-    Ok(marked_blobs)
+        Ok(marked_blobs)
+    })
 }
 
 fn mark_blob_for_garbage_collection(
     tx: &WriteTransaction,
-    file_db: &TenantFileMetaDb,
     active_upload_hashes: &HashSet<String>,
     data_dir: &Path,
     index_entry: (AccessGuard<'_, &str>, MultimapValue<'_, &[u8]>),
@@ -153,7 +134,7 @@ fn mark_blob_for_garbage_collection(
         let mut is_referenced = false;
         for file_key in file_keys {
             let file_key_guard = file_key?;
-            is_referenced = is_blob_referenced(tx, file_db, file_key_guard)
+            is_referenced = is_blob_referenced(tx, tenant_id, file_key_guard)
                 .context("checking blob references")?;
             if is_referenced {
                 break;
@@ -168,11 +149,8 @@ fn mark_blob_for_garbage_collection(
             );
             return Ok((hash.to_owned(), false));
         }
-        let pending_deletion_db = PendingBlobDeletionDb::new(UserContext {
-            tenant_id: tenant_id.to_string(),
-            user_id: tenant_id.to_string(),
-        });
-        if pending_deletion_db.exists_tx(tx, hash)? {
+
+        if db_pending_blob_deletions::exists_tx(&Transaction::Write(tx), tenant_id, hash)? {
             tracing::trace!(tenant_id, blob_hash = hash, "blob already pending deletion");
             return Ok((hash.to_owned(), false));
         }
@@ -189,16 +167,16 @@ fn mark_blob_for_garbage_collection(
             return Err(anyhow::anyhow!("blob storage entry is not a regular file")
                 .context("checking blob type"));
         }
-        pending_deletion_db
-            .put_tx(
-                tx,
-                hash,
-                PendingBlobDeletionRecord {
-                    size_bytes: metadata.len(),
-                    marked_at: chrono::Utc::now(),
-                },
-            )
-            .context("persisting blob deletion intent")?;
+        db_pending_blob_deletions::put_tx(
+            tx,
+            tenant_id,
+            hash,
+            PendingBlobDeletionRecord {
+                size_bytes: metadata.len(),
+                marked_at: chrono::Utc::now(),
+            },
+        )
+        .context("persisting blob deletion intent")?;
         Ok((hash.to_owned(), true))
     })()
     .inspect_err(|err| {
@@ -209,7 +187,7 @@ fn mark_blob_for_garbage_collection(
 
 fn is_blob_referenced(
     tx: &WriteTransaction,
-    file_db: &TenantFileMetaDb,
+    tenant_id: &str,
     file_key_guard: AccessGuard<'_, &[u8]>,
 ) -> anyhow::Result<bool> {
     let bytes = file_key_guard.value();
@@ -217,7 +195,7 @@ fn is_blob_referenced(
     let (_tenant_id, path) = tenant_path
         .split_once('\0')
         .ok_or_else(|| anyhow::anyhow!("invalid file_meta key"))?;
-    let file_meta = file_db.get_tx(tx, path)?;
+    let file_meta = db_file::get_tx(&Transaction::Write(tx), tenant_id, path)?;
     match file_meta {
         Some(file_meta) => Ok(!file_meta.is_deleted),
         None => Err(anyhow::anyhow!(
@@ -227,15 +205,9 @@ fn is_blob_referenced(
 }
 
 fn delete_marked_blobs(data_dir: &Path, db: Arc<Database>, tenant_id: &str) -> Result<GcReport> {
-    let ctx = UserContext {
-        tenant_id: tenant_id.to_string(),
-        user_id: tenant_id.to_string(),
-    };
-    let pending_deletion_db = PendingBlobDeletionDb::new(ctx.clone());
-    let usage_db = TenantUsageDb::new(db.clone(), ctx);
     let pending_deletions = (|| -> Result<_> {
         let tx = db.begin_write()?;
-        let pending = pending_deletion_db.list(&tx)?;
+        let pending = db_pending_blob_deletions::list_tx(&Transaction::Write(&tx), tenant_id)?;
         tx.commit()?;
         Ok(pending)
     })()
@@ -255,11 +227,9 @@ fn delete_marked_blobs(data_dir: &Path, db: Arc<Database>, tenant_id: &str) -> R
                 .context("opening blob deletion transaction")?;
             let removed = storage::remove_if_exists(data_dir, tenant_id, hash.as_str())
                 .context("removing pending blob from storage")?;
-            pending_deletion_db
-                .delete_tx(&tx, hash.as_str())
+            db_pending_blob_deletions::delete_tx(&tx, tenant_id, hash.as_str())
                 .context("removing pending intent")?;
-            usage_db
-                .decrement_tx(&tx, pending_deletion.size_bytes)
+            db_usage::decrement_tx(&tx, tenant_id, pending_deletion.size_bytes)
                 .context("releasing blob usage charge")?;
             tx.commit().context("committing blob deletion accounting")?;
             Ok(removed)
@@ -339,16 +309,15 @@ mod test {
             tenant_id: tenant_id.to_string(),
             user_id: tenant_id.to_string(),
         };
-        let tenant_db = TenantDb::new();
+
         let tx = db.begin_write().unwrap();
-        tenant_db
-            .create(
-                &tx,
-                TenantRecord {
-                    tenant_id: tenant_id.to_string(),
-                },
-            )
-            .unwrap();
+        db_tenants::create_tx(
+            &tx,
+            TenantRecord {
+                tenant_id: tenant_id.to_string(),
+            },
+        )
+        .unwrap();
         tx.commit().unwrap();
         TenantFileService::new(
             db.clone(),
@@ -439,15 +408,10 @@ mod test {
             assert!(!std::path::Path::new(&expected_deleted_file).exists());
         }
 
-        let usage_db = TenantUsageDb::new(
-            db.clone(),
-            UserContext {
-                tenant_id: tenant_id.to_owned(),
-                user_id: tenant_id.to_owned(),
-            },
-        );
         let tx = db.begin_read().unwrap();
-        let usage = usage_db.get_tx(&Transaction::Read(&tx)).unwrap().unwrap();
+        let usage = db_usage::get_tx(&Transaction::Read(&tx), tenant_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(usage.usage, 55);
     }
 
@@ -455,16 +419,15 @@ mod test {
     fn garbage_collect_empty_tenant_does_not_fail() {
         let (storage_dir, db) = test_db();
         let db = Arc::new(db);
-        let tenant_db = TenantDb::new();
+
         let tx = db.begin_write().unwrap();
-        tenant_db
-            .create(
-                &tx,
-                TenantRecord {
-                    tenant_id: "tenant1".to_string(),
-                },
-            )
-            .unwrap();
+        db_tenants::create_tx(
+            &tx,
+            TenantRecord {
+                tenant_id: "tenant1".to_string(),
+            },
+        )
+        .unwrap();
         tx.commit().unwrap();
 
         let file_metas_delete =
@@ -502,26 +465,16 @@ mod test {
             storage::get_storage_path(storage_dir.path(), "tenant1", &fm1.content_hash);
         assert!(!expected_deleted_file.exists());
 
-        let usage_db1 = TenantUsageDb::new(
-            db.clone(),
-            UserContext {
-                tenant_id: "tenant1".to_owned(),
-                user_id: "tenant1".to_owned(),
-            },
-        );
         let tx = db.begin_read().unwrap();
-        let usage = usage_db1.get_tx(&Transaction::Read(&tx)).unwrap().unwrap();
+        let usage = db_usage::get_tx(&Transaction::Read(&tx), "tenant1")
+            .unwrap()
+            .unwrap();
         assert_eq!(usage.usage, 0);
 
-        let usage_db2 = TenantUsageDb::new(
-            db.clone(),
-            UserContext {
-                tenant_id: "tenant2".to_owned(),
-                user_id: "tenant2".to_owned(),
-            },
-        );
         let tx = db.begin_read().unwrap();
-        let usage = usage_db2.get_tx(&Transaction::Read(&tx)).unwrap().unwrap();
+        let usage = db_usage::get_tx(&Transaction::Read(&tx), "tenant2")
+            .unwrap()
+            .unwrap();
         assert_eq!(usage.usage, 11);
     }
 
@@ -553,15 +506,14 @@ mod test {
             tenant_id: "tenant1".to_owned(),
             user_id: "tenant1".to_owned(),
         };
-        let pending_db = PendingBlobDeletionDb::new(ctx.clone());
-        let usage_db = TenantUsageDb::new(db.clone(), ctx);
+
         let tx = db.begin_write().unwrap();
-        let usage = usage_db
-            .get_tx(&Transaction::Write(&tx))
+        let usage = db_usage::get_tx(&Transaction::Write(&tx), &ctx.tenant_id)
             .unwrap()
             .unwrap()
             .usage;
-        let pending = pending_db.list(&tx).unwrap();
+        let pending =
+            db_pending_blob_deletions::list_tx(&Transaction::Write(&tx), &ctx.tenant_id).unwrap();
         tx.commit().unwrap();
         (usage, pending)
     }
